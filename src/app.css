@@ -1,0 +1,110 @@
+.bcm-root {
+  --bcm-text: #f2f6fb; --bcm-muted: #b8c9dd; --bcm-surface: #141c26;
+  --bcm-panel: #1c2733; --bcm-line: #405063; --bcm-accent: #75d2fa;
+  position: fixed; inset: 0; z-index: 2147483000; pointer-events: none;
+  color: var(--bcm-text); font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif;
+  text-align: start; color-scheme: dark;
+}
+.bcm-root [hidden], .bcm-dock[hidden], .bcm-mask[hidden] { display: none !important; }
+.bcm-root *, .bcm-dock *, .bcm-mask * { box-sizing: border-box; }
+.bcm-root :focus-visible, .bcm-dock :focus-visible, .bcm-mask :focus-visible { outline: 2px solid #75d2fa; outline-offset: 3px; }
+.bcm-root button, .bcm-root input, .bcm-root select, .bcm-dock button, .bcm-mask button { font: inherit; }
+.bcm-root ::selection { background: #75d2fa; color: #092333; }
+.bcm-root button:disabled, .bcm-dock button:disabled { opacity: .6; cursor: wait; }
+.bcm-root .bcm-notebook { z-index: 10; }
+.bcm-root .bcm-loopbar { z-index: 20; }
+.bcm-root .bcm-panel { z-index: 30; }
+.bcm-root .bcm-notification { z-index: 40; pointer-events: none; }
+.bcm-mask {
+  position: absolute !important; z-index: 25 !important; box-sizing: border-box !important;
+  user-select: none; touch-action: none; cursor: pointer; pointer-events: auto;
+  background: transparent; backdrop-filter: blur(var(--bcm-blur,14px));
+  -webkit-backdrop-filter: blur(var(--bcm-blur,14px));
+  mask-image: linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 16%,#000 84%,transparent);
+  mask-composite: intersect;
+  -webkit-mask-image: linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 16%,#000 84%,transparent);
+  -webkit-mask-composite: source-in;
+}
+.bcm-mask.bcm-solid { background: #151b22; backdrop-filter: none; -webkit-backdrop-filter: none; }
+.bcm-mask:not(.bcm-edit):not(.bcm-wheeling):hover, .bcm-mask.bcm-peek:not(.bcm-edit):not(.bcm-wheeling) {
+  background: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; mask-image: none; -webkit-mask-image: none;
+}
+.bcm-mask.bcm-edit, .bcm-mask.bcm-wheeling {
+  mask-image: none; -webkit-mask-image: none; outline: 2px dashed #75d2fa;
+  background: rgb(16 49 66 / 45%); backdrop-filter: blur(3px); cursor: move;
+}
+.bcm-mask .bcm-mask-tools {
+  position: absolute; bottom: calc(100% + 8px); right: 0; display: none;
+  align-items: center; flex-wrap: wrap; gap: 6px; min-width: 180px;
+  padding: 5px 8px; border-radius: 7px; background: #141c26; color: #f2f6fb;
+  font: 12px/1.5 system-ui, sans-serif;
+}
+.bcm-mask.bcm-edit .bcm-mask-tools { display: flex; }
+.bcm-mask-tools button, .bcm-dock button {
+  appearance: none; color: #eaf5ff; background: transparent; border: 0;
+  padding: 6px 8px; min-height: 30px; border-radius: 5px; cursor: pointer;
+}
+.bcm-dock button:hover, .bcm-mask-tools button:hover { background: #34495c; }
+.bcm-handle { display: none; position: absolute; width: 12px; height: 12px; background: #75d2fa; border: 1px solid #0e2836; border-radius: 2px; }
+.bcm-edit .bcm-handle { display: block; }
+.bcm-handle[data-handle="n"] { top:-6px; left:calc(50% - 6px); cursor:ns-resize; }
+.bcm-handle[data-handle="s"] { bottom:-6px; left:calc(50% - 6px); cursor:ns-resize; }
+.bcm-handle[data-handle="e"] { right:-6px; top:calc(50% - 6px); cursor:ew-resize; }
+.bcm-handle[data-handle="w"] { left:-6px; top:calc(50% - 6px); cursor:ew-resize; }
+.bcm-handle[data-handle="nw"] { top:-6px; left:-6px; cursor:nwse-resize; }
+.bcm-handle[data-handle="ne"] { top:-6px; right:-6px; cursor:nesw-resize; }
+.bcm-handle[data-handle="sw"] { bottom:-6px; left:-6px; cursor:nesw-resize; }
+.bcm-handle[data-handle="se"] { bottom:-6px; right:-6px; cursor:nwse-resize; }
+.bcm-dock {
+  position: absolute; top: 12px; right: 12px; z-index: 26;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px; max-width: calc(100% - 24px);
+  padding: 4px 6px; border-radius: 9px; background: rgb(20 28 38 / 92%);
+  color: #f2f6fb; font: 12px/1.4 system-ui, "Microsoft YaHei", sans-serif;
+  transition: opacity .2s ease; pointer-events: auto;
+}
+.bcm-dock.bcm-idle:not(:hover):not(:focus-within) { opacity: 0; pointer-events: none; }
+.bcm-dock .bcm-version-button { color: #75d2fa; font-variant-numeric: tabular-nums; }
+.bcm-notification {
+  position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
+  max-width: min(620px,calc(100% - 32px)); padding: 12px 18px; border-radius: 9px;
+  background: #1c2733; color: #f2f6fb; box-shadow: 0 8px 24px rgb(0 0 0 / 28%);
+  overflow-wrap: anywhere; pointer-events: auto;
+}
+.bcm-notification[data-kind="error"] { color: #ffc0bc; }
+.bcm-panel {
+  position: absolute; top: 14px; right: 14px; width: min(390px,calc(100% - 28px));
+  max-height: calc(100% - 28px); overflow: auto; padding: 20px; border-radius: 12px;
+  background: #141c26; color: #f2f6fb; box-shadow: 0 12px 32px rgb(0 0 0 / 32%);
+  pointer-events: auto; scrollbar-color: #536b80 #141c26;
+}
+.bcm-panel h2 { margin: 0 0 14px; font-size: 20px; font-weight: 650; }
+.bcm-panel p { margin: 10px 0; color: #b8c9dd; }
+.bcm-panel label { display: grid; grid-template-columns: 1fr 112px; gap: 12px; align-items: center; margin: 12px 0; }
+.bcm-panel input:not([type="checkbox"]), .bcm-panel select {
+  min-width: 0; width: 100%; min-height: 34px; padding: 6px 8px;
+  border: 1px solid #53677b; border-radius: 5px; background: #111923; color: #f2f6fb;
+}
+.bcm-panel input[type="checkbox"] { justify-self: end; width: 18px; height: 18px; accent-color: #75d2fa; }
+.bcm-panel button, .bcm-loopbar button {
+  border: 1px solid #53677b; background: #253647; color: #f2f6fb; border-radius: 6px;
+  min-height: 34px; padding: 7px 12px; cursor: pointer;
+}
+.bcm-panel button:hover, .bcm-loopbar button:hover { background: #38536b; }
+.bcm-panel .bcm-primary { background: #75d2fa; border-color: #75d2fa; color: #092333; }
+.bcm-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.bcm-panel dl { margin: 14px 0; }
+.bcm-panel dt { margin-top: 12px; font-weight: 650; }
+.bcm-panel dd { margin: 4px 0 0; color: #b8c9dd; }
+.bcm-loopbar {
+  position: absolute; bottom: 74px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
+  max-width: calc(100% - 24px); padding: 10px 14px; border-radius: 9px;
+  background: #141c26; color: #f2f6fb; pointer-events: auto;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 540px) {
+  .bcm-dock { top: 6px; right: 6px; max-width: calc(100% - 12px); }
+  .bcm-dock button { padding: 5px 6px; }
+  .bcm-notification { top: 6px; }
+}
+@media (prefers-reduced-motion: reduce) { .bcm-dock { transition: none; } }

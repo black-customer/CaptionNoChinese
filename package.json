@@ -1,0 +1,20 @@
+{
+  "name": "bilibili-caption-study",
+  "version": "2.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Bilibili caption mask and local scene review notebook",
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test --test-isolation=none tests/*.test.js",
+    "test:browser": "playwright test",
+    "check": "npm run test && npm run build && node --check bilibili-caption-blur-mask.user.js",
+    "preview": "node scripts/serve.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "esbuild": "0.28.2",
+    "fake-indexeddb": "6.2.5"
+  }
+}
