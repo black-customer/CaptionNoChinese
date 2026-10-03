@@ -8,7 +8,49 @@ import notebookStyles from './notebook.css';
 
 const VERSION = __APP_VERSION__;
 const clamp = (n, low, high) => Math.max(low, Math.min(high, n));
-const editable = target => !!(target?.isContentEditable || target?.closest?.('input,textarea,select,[role="textbox"]'));
+function getDeepActiveElement(doc = document) {
+  let active = doc?.activeElement;
+  while (active?.shadowRoot?.activeElement) {
+    active = active.shadowRoot.activeElement;
+  }
+  return active;
+}
+function isEditableNode(node) {
+  if (!node) return false;
+  const el = node.nodeType === 3 ? node.parentElement : (node.nodeType === 1 ? node : null);
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = (el.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+  const role = el.getAttribute?.('role');
+  if (role === 'textbox' || role === 'searchbox' || role === 'combobox') return true;
+  const ce = el.getAttribute?.('contenteditable');
+  if (ce != null && ce !== 'false') return true;
+  if (tag === 'bili-comment-box' || tag === 'bili-comment-reply-box' || tag === 'bili-comments-box-root' || tag === 'bili-comment-editor') return true;
+  if (el.classList?.contains('ProseMirror') || el.classList?.contains('comment-send-box') || el.classList?.contains('reply-box') || el.classList?.contains('bili-comment-box')) return true;
+  if (el.closest?.('input,textarea,select,[role="textbox"],[role="searchbox"],[role="combobox"],[contenteditable]:not([contenteditable="false"]),bili-comment-box,bili-comment-reply-box,bili-comments-box-root,.comment-send-box,.reply-box,.bili-comment-box')) return true;
+  return false;
+}
+function editable(targetOrEvent) {
+  if (!targetOrEvent) return false;
+  const doc = typeof document !== 'undefined' ? document : null;
+  if (doc) {
+    if (isEditableNode(getDeepActiveElement(doc))) return true;
+    if (isEditableNode(doc.activeElement)) return true;
+  }
+  if (typeof targetOrEvent.composedPath === 'function' || 'target' in targetOrEvent) {
+    const event = targetOrEvent;
+    if (isEditableNode(event.target)) return true;
+    if (typeof event.composedPath === 'function') {
+      const path = event.composedPath();
+      for (let i = 0; i < path.length; i++) {
+        if (isEditableNode(path[i])) return true;
+      }
+    }
+    return false;
+  }
+  return isEditableNode(targetOrEvent);
+}
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -306,7 +348,7 @@ function start() {
   });
   const events = new AbortController();
   window.addEventListener('wheel', event => {
-    if (!snapshot || !event.altKey || event.ctrlKey || event.metaKey || !config.enabled || edit || editable(event.target) || !container.contains(event.target) || !event.deltaY) return;
+    if (!snapshot || !event.altKey || event.ctrlKey || event.metaKey || !config.enabled || edit || editable(event) || !container.contains(event.target) || !event.deltaY) return;
     event.preventDefault(); event.stopImmediatePropagation();
     config.top = clamp(config.top + (event.deltaY > 0 ? .5 : -.5), 0, 100 - config.height);
     geometryDirty = true;
@@ -321,7 +363,7 @@ function start() {
       else if (edit) { edit = false; cancelDrag(); paint(); }
       return;
     }
-    if (!snapshot || editable(event.target) || event.isComposing || event.ctrlKey || event.metaKey) return;
+    if (!snapshot || editable(event) || event.isComposing || event.ctrlKey || event.metaKey) return;
     if (event.key === 'Alt') { peek = true; paint(); return; }
     if (event.repeat) return;
     const key = (event.code?.replace(/^Key/, '') || event.key).toUpperCase();

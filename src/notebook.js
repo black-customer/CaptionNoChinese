@@ -68,7 +68,7 @@ function blobDataUrl(blob) {
 }
 
 /** Non-modal notebook. The caller owns attachment and fullscreen placement. */
-export function createNotebook({ repo, player, notify = () => {}, version = '2.4.0', onChange = () => {}, onLoop, onHelp, onSettings, getLeadIn = () => 3 }) {
+export function createNotebook({ repo, player, notify = () => {}, version = '2.4.1', onChange = () => {}, onLoop, onHelp, onSettings, getLeadIn = () => 3 }) {
     let opened = false;
     let disposed = false;
     let offset = 0;

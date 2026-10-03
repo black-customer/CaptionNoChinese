@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 剧集双语字幕羽化遮罩与生词本 (看剧学英语)
 // @namespace    https://github.com/CaptionNoChinese
-// @version      2.4.0
+// @version      2.4.1
 // @description  中文字幕遮罩、可靠场景收藏、跨集回听、片段循环、搜索复习与本地备份恢复。
 // @author       black-customer
 // @homepageURL  https://github.com/black-customer/CaptionNoChinese
@@ -1485,7 +1485,7 @@
     });
   }
   function createNotebook({ repo, player, notify = () => {
-  }, version = "2.4.0", onChange = () => {
+  }, version = "2.4.1", onChange = () => {
   }, onLoop, onHelp, onSettings, getLeadIn = () => 3 }) {
     let opened = false;
     let disposed = false;
@@ -2469,9 +2469,51 @@
   var notebook_default = '.bcm-notebook {\n    --bcm-surface: #141c26;\n    --bcm-panel: #1c2733;\n    --bcm-field: #111923;\n    --bcm-line: #405063;\n    --bcm-text: #f2f6fb;\n    --bcm-muted: #b8c9dd;\n    --bcm-accent: #75d2fa;\n    --bcm-accent-ink: #092333;\n    --bcm-error: #ffc0bc;\n    position: absolute;\n    inset-block: 0;\n    inset-inline-end: 0;\n    display: flex;\n    flex-direction: column;\n    box-sizing: border-box;\n    width: 420px;\n    max-width: 100vw;\n    max-width: min(100vw, 100%);\n    height: 100%;\n    min-height: 0;\n    overflow: hidden;\n    color: var(--bcm-text);\n    background: var(--bcm-surface);\n    box-shadow: -12px 0 32px rgb(0 0 0 / 30%);\n    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;\n    text-align: start;\n    color-scheme: dark;\n    isolation: isolate;\n    pointer-events: auto;\n}\n\n.bcm-notebook [hidden], .bcm-notebook[hidden] { display: none !important; }\n.bcm-notebook *, .bcm-notebook *::before, .bcm-notebook *::after { box-sizing: border-box; }\n.bcm-notebook h2, .bcm-notebook h3, .bcm-notebook p { margin: 0; padding: 0; }\n.bcm-notebook button, .bcm-notebook input, .bcm-notebook select, .bcm-notebook textarea { font: inherit; letter-spacing: normal; }\n.bcm-notebook ::selection { color: var(--bcm-accent-ink); background: var(--bcm-accent); }\n.bcm-notebook :focus-visible { outline: 2px solid var(--bcm-accent); outline-offset: 3px; }\n.bcm-notebook button:disabled { opacity: .55; cursor: not-allowed; }\n.bcm-notebook button { touch-action: manipulation; }\n.bcm-notebook-header { flex: none; padding: 18px 18px 14px; border-block-end: 1px solid var(--bcm-line); background: var(--bcm-surface); }\n.bcm-heading-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-notebook .bcm-notebook-title { margin-inline-end: auto; font-size: 20px; line-height: 1.3; font-weight: 650; }\n.bcm-version { color: var(--bcm-accent); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notebook .bcm-subtitle { margin-block: 8px 12px; color: var(--bcm-muted); font-size: 14px; }\n.bcm-toolbar { display: flex; flex-wrap: wrap; gap: 8px; }\n.bcm-notebook .bcm-button {\n    appearance: none;\n    display: inline-flex;\n    justify-content: center;\n    align-items: center;\n    gap: 6px;\n    min-height: 36px;\n    max-width: 100%;\n    padding: 7px 11px;\n    border: 1px solid var(--bcm-line);\n    border-radius: 7px;\n    color: var(--bcm-text);\n    background: var(--bcm-panel);\n    font-size: 13px;\n    line-height: 1.3;\n    text-align: center;\n    text-decoration: none;\n    overflow-wrap: anywhere;\n    cursor: pointer;\n}\n.bcm-notebook .bcm-button:hover:not(:disabled) { background: #2b3c4e; border-color: #7891aa; }\n.bcm-notebook .bcm-button-primary { color: var(--bcm-accent-ink); background: var(--bcm-accent); border-color: transparent; font-weight: 650; }\n.bcm-notebook .bcm-button-primary:hover:not(:disabled) { background: #a0e3ff; border-color: transparent; }\n.bcm-notebook .bcm-button-quiet { background: transparent; border-color: transparent; color: var(--bcm-muted); }\n.bcm-notebook .bcm-delete:hover:not(:disabled) { color: var(--bcm-error); background: #452d32; border-color: transparent; }\n.bcm-notebook-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: #657c92 var(--bcm-surface); scrollbar-width: thin; }\n.bcm-notebook-scroll::-webkit-scrollbar { width: 8px; }\n.bcm-notebook-scroll::-webkit-scrollbar-track { background: var(--bcm-surface); }\n.bcm-notebook-scroll::-webkit-scrollbar-thumb { background: #657c92; border-radius: 8px; border: 2px solid var(--bcm-surface); }\n.bcm-filters { padding: 18px; display: grid; gap: 12px; }\n.bcm-field { display: grid; gap: 6px; min-width: 0; }\n.bcm-label { color: var(--bcm-muted); font-size: 12px; line-height: 1.4; }\n.bcm-filter-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }\n.bcm-notebook .bcm-input, .bcm-notebook .bcm-select {\n    appearance: auto;\n    display: block;\n    width: 100%;\n    min-width: 0;\n    max-width: 100%;\n    min-height: 38px;\n    padding: 8px 10px;\n    border: 1px solid var(--bcm-line);\n    border-radius: 7px;\n    color: var(--bcm-text);\n    background: var(--bcm-field);\n    caret-color: var(--bcm-accent);\n    font-size: 14px;\n    line-height: 1.5;\n}\n.bcm-notebook .bcm-input::placeholder { color: #a3b7ce; opacity: 1; }\n.bcm-notebook textarea.bcm-input { min-height: 86px; resize: vertical; overflow-wrap: anywhere; }\n.bcm-summary-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-result-summary { flex: 1; color: var(--bcm-muted); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notices, .bcm-undo { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 18px 16px; padding: 12px; background: #233747; border-radius: 8px; overflow-wrap: anywhere; }\n.bcm-notices > span, .bcm-undo > span { flex: 1 1 180px; }\n.bcm-notice-error { color: var(--bcm-error); background: #3b272d; }\n.bcm-import-preview { margin: 0 18px 18px; padding: 14px; background: var(--bcm-panel); border-radius: 8px; overflow-wrap: anywhere; }\n.bcm-notebook .bcm-import-preview h3 { font-size: 16px; margin-block-end: 8px; }\n.bcm-notebook .bcm-import-preview p { margin-block-end: 12px; }\n.bcm-note-list { padding-inline: 18px; }\n.bcm-note { display: grid; gap: 12px; padding-block: 20px 22px; border-block-start: 1px solid var(--bcm-line); min-width: 0; }\n.bcm-note-header { display: flex; align-items: start; gap: 10px; min-width: 0; }\n.bcm-notebook .bcm-note-title { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 15px; line-height: 1.5; font-weight: 600; }\n.bcm-note-header .bcm-button { flex-shrink: 0; }\n.bcm-note-meta { color: var(--bcm-muted); font-size: 12px; overflow-wrap: anywhere; }\n.bcm-image-placeholder { display: grid; align-items: center; min-height: 80px; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 8px; color: var(--bcm-muted); background: #0c121a; font-size: 13px; text-align: center; }\n.bcm-note-image { display: block; width: 100%; height: 100%; object-fit: contain; }\n.bcm-playback-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-play-button { font-variant-numeric: tabular-nums; }\n.bcm-note-bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, 1fr); align-items: end; gap: 12px; }\n.bcm-save-state { padding-block-end: 10px; color: var(--bcm-muted); font-size: 12px; text-align: end; overflow-wrap: anywhere; }\n.bcm-save-error { color: var(--bcm-error); }\n.bcm-empty { padding: 28px 8px 36px; color: var(--bcm-muted); overflow-wrap: anywhere; }\n.bcm-notebook .bcm-empty h3 { color: var(--bcm-text); font-size: 16px; margin-block-end: 10px; }\n.bcm-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 14px 18px; border-block-start: 1px solid var(--bcm-line); }\n.bcm-page-label { color: var(--bcm-muted); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notebook .bcm-storage-note { padding: 16px 18px 22px; color: var(--bcm-muted); font-size: 12px; overflow-wrap: anywhere; }\n@media (max-width: 440px) {\n    .bcm-notebook { width: 100%; }\n    .bcm-notebook-header { padding: 12px; }\n    .bcm-filters { padding: 14px 12px; }\n    .bcm-note-list { padding-inline: 12px; }\n    .bcm-notices, .bcm-undo, .bcm-import-preview { margin-inline: 12px; }\n    .bcm-notebook .bcm-input, .bcm-notebook .bcm-select { font-size: 16px; }\n    .bcm-toolbar { gap: 6px; }\n}\n@media (max-height: 420px) {\n    .bcm-notebook-header { padding-block: 10px; }\n    .bcm-notebook .bcm-subtitle { display: none; }\n    .bcm-notebook-header .bcm-toolbar { margin-block-start: 8px; }\n}\n@media (prefers-reduced-motion: reduce) {\n    .bcm-notebook *, .bcm-notebook *::before, .bcm-notebook *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }\n}\n@media (forced-colors: active) {\n    .bcm-notebook { border: 1px solid CanvasText; }\n    .bcm-notebook :focus-visible { outline-color: Highlight; }\n    .bcm-notebook .bcm-button { border: 1px solid ButtonText; }\n}\n';
 
   // src/main.js
-  var VERSION = "2.4.0";
+  var VERSION = "2.4.1";
   var clamp = (n, low, high) => Math.max(low, Math.min(high, n));
-  var editable = (target) => !!(target?.isContentEditable || target?.closest?.('input,textarea,select,[role="textbox"]'));
+  function getDeepActiveElement(doc = document) {
+    let active = doc?.activeElement;
+    while (active?.shadowRoot?.activeElement) {
+      active = active.shadowRoot.activeElement;
+    }
+    return active;
+  }
+  function isEditableNode(node2) {
+    if (!node2) return false;
+    const el2 = node2.nodeType === 3 ? node2.parentElement : node2.nodeType === 1 ? node2 : null;
+    if (!el2) return false;
+    if (el2.isContentEditable) return true;
+    const tag = (el2.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+    const role = el2.getAttribute?.("role");
+    if (role === "textbox" || role === "searchbox" || role === "combobox") return true;
+    const ce = el2.getAttribute?.("contenteditable");
+    if (ce != null && ce !== "false") return true;
+    if (tag === "bili-comment-box" || tag === "bili-comment-reply-box" || tag === "bili-comments-box-root" || tag === "bili-comment-editor") return true;
+    if (el2.classList?.contains("ProseMirror") || el2.classList?.contains("comment-send-box") || el2.classList?.contains("reply-box") || el2.classList?.contains("bili-comment-box")) return true;
+    if (el2.closest?.('input,textarea,select,[role="textbox"],[role="searchbox"],[role="combobox"],[contenteditable]:not([contenteditable="false"]),bili-comment-box,bili-comment-reply-box,bili-comments-box-root,.comment-send-box,.reply-box,.bili-comment-box')) return true;
+    return false;
+  }
+  function editable(targetOrEvent) {
+    if (!targetOrEvent) return false;
+    const doc = typeof document !== "undefined" ? document : null;
+    if (doc) {
+      if (isEditableNode(getDeepActiveElement(doc))) return true;
+      if (isEditableNode(doc.activeElement)) return true;
+    }
+    if (typeof targetOrEvent.composedPath === "function" || "target" in targetOrEvent) {
+      const event = targetOrEvent;
+      if (isEditableNode(event.target)) return true;
+      if (typeof event.composedPath === "function") {
+        const path = event.composedPath();
+        for (let i = 0; i < path.length; i++) {
+          if (isEditableNode(path[i])) return true;
+        }
+      }
+      return false;
+    }
+    return isEditableNode(targetOrEvent);
+  }
   function el(tag, className, text2) {
     const node2 = document.createElement(tag);
     if (className) node2.className = className;
@@ -2944,7 +2986,7 @@
     });
     const events = new AbortController();
     window.addEventListener("wheel", (event) => {
-      if (!snapshot || !event.altKey || event.ctrlKey || event.metaKey || !config.enabled || edit || editable(event.target) || !container.contains(event.target) || !event.deltaY) return;
+      if (!snapshot || !event.altKey || event.ctrlKey || event.metaKey || !config.enabled || edit || editable(event) || !container.contains(event.target) || !event.deltaY) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       config.top = clamp(config.top + (event.deltaY > 0 ? 0.5 : -0.5), 0, 100 - config.height);
@@ -2975,7 +3017,7 @@
         }
         return;
       }
-      if (!snapshot || editable(event.target) || event.isComposing || event.ctrlKey || event.metaKey) return;
+      if (!snapshot || editable(event) || event.isComposing || event.ctrlKey || event.metaKey) return;
       if (event.key === "Alt") {
         peek = true;
         paint();

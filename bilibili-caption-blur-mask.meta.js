@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 剧集双语字幕羽化遮罩与生词本 (看剧学英语)
 // @namespace    https://github.com/CaptionNoChinese
-// @version      2.4.0
+// @version      2.4.1
 // @description  中文字幕遮罩、可靠场景收藏、跨集回听、片段循环、搜索复习与本地备份恢复。
 // @author       black-customer
 // @homepageURL  https://github.com/black-customer/CaptionNoChinese

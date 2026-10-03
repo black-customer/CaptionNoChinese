@@ -11,7 +11,7 @@ async function boot(page) {
     body: route.request().url().includes('/__bcm__/bundle.js') ? script : fixture,
   }));
   await page.goto(url);
-  await expect(page.locator('#bcm-app')).toHaveAttribute('data-version', '2.4.0');
+  await expect(page.locator('#bcm-app')).toHaveAttribute('data-version', '2.4.1');
   await expect(page.locator('.bcm-dock')).toBeVisible();
   await page.waitForFunction(() => document.querySelector('video').readyState >= 2);
 }
@@ -136,4 +136,49 @@ test('plain and plaintext-only contenteditable fields keep single-letter typing'
   await page.evaluate(()=>{for(const value of ['', 'plaintext-only']){const input=document.createElement('div');input.setAttribute('contenteditable',value);input.setAttribute('aria-label',value||'plain');input.textContent='edit here';document.querySelector('.outside').append(input);}});
   for(const selector of ['[aria-label="plain"]','[contenteditable="plaintext-only"]']){await page.locator(selector).click();await page.keyboard.type('sbs');}
   await dockClick(page,'notebook');await expect(page.locator('.bcm-note')).toHaveCount(0);
+});
+
+test('typing inside shadow DOM comment box and reply box does not trigger shortcuts', async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => {
+    class MockComments extends HTMLElement {
+      constructor() {
+        super();
+        const root = this.attachShadow({ mode: 'open' });
+        const box = document.createElement('bili-comment-box');
+        const boxRoot = box.attachShadow({ mode: 'open' });
+        const editor = document.createElement('div');
+        editor.className = 'ProseMirror';
+        editor.setAttribute('contenteditable', 'true');
+        editor.setAttribute('role', 'textbox');
+        editor.textContent = '发一条友善的评论';
+        boxRoot.append(editor);
+        root.append(box);
+
+        const reply = document.createElement('bili-comment-reply-box');
+        const replyRoot = reply.attachShadow({ mode: 'open' });
+        const replyEditor = document.createElement('div');
+        replyEditor.className = 'reply-box-textarea';
+        replyEditor.setAttribute('contenteditable', 'plaintext-only');
+        replyEditor.textContent = '回复评论';
+        replyRoot.append(replyEditor);
+        root.append(reply);
+      }
+    }
+    customElements.define('bili-comments', MockComments);
+    document.querySelector('.outside').append(document.createElement('bili-comments'));
+  });
+
+  const mainEditor = page.locator('bili-comments').locator('bili-comment-box').locator('.ProseMirror');
+  await mainEditor.click();
+  await page.keyboard.type('sbsb');
+
+  const replyEditor = page.locator('bili-comments').locator('bili-comment-reply-box').locator('.reply-box-textarea');
+  await replyEditor.click();
+  await page.keyboard.type('sbsb');
+
+  await expect(page.locator('.bcm-notification')).not.toContainText('已收藏');
+  await expect(page.locator('.bcm-notebook')).toBeHidden();
+  await dockClick(page, 'notebook');
+  await expect(page.locator('.bcm-note')).toHaveCount(0);
 });

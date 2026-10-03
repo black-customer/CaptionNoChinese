@@ -2,6 +2,13 @@
 
 兼容性与实测范围见 [验收记录](docs/ACCEPTANCE.md)。
 
+## v2.4.1 — 2026-09-16
+
+### 修复
+
+- 深度适配 B 站现代 Web Component / Shadow DOM 评论区（`<bili-comments>`、`<bili-comment-box>`、`<bili-comment-reply-box>`）及 ProseMirror 富文本编辑器。
+- 增强输入状态判定：遍历事件 `composedPath()`、穿透各层 Shadow Root 检查深层焦点，彻底防止在评论框、回复框内打字时误触发快捷键（如按 S 键自动截图收藏、按 B 键打开复习本）。
+
 ## v2.4.0 — 2026-09-15
 
 ### 修复
