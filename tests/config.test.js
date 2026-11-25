@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createConfigStore } from '../src/config.js';
+import { DEFAULT_SHORTCUTS } from '../src/shortcuts.js';
 
 const LEGACY_KEY = 'bili_caption_mask_v200_cfg';
 const GLOBAL_KEY = 'bili_caption_mask_v240_global';
@@ -22,10 +23,13 @@ test('config defaults are independent snapshots and geometry remains inside the 
     const defaults = store.get('one');
     assert.deepEqual(defaults, {
         enabled: true, left: 15, top: 84, width: 70, height: 7.2, blur: 14, mode: 'blur',
-        singleKeys: true, leadIn: 3, loopBefore: 3, loopAfter: 3, loopCount: 3, loopGap: 0, playbackRate: 1, reviewBatch: 20
+        singleKeys: true, leadIn: 3, loopBefore: 3, loopAfter: 3, loopCount: 3, loopGap: 0, playbackRate: 1, reviewBatch: 20,
+        shortcuts: { ...DEFAULT_SHORTCUTS }
     });
     defaults.left = 0;
+    defaults.shortcuts.capture = 'X';
     assert.equal(store.get('one').left, 15);
+    assert.equal(store.get('one').shortcuts.capture, 'Alt+S');
     const clamped = store.patch('one', { left: 200, top: 100, width: 500, height: -1 });
     assert.deepEqual([clamped.left, clamped.top, clamped.width, clamped.height], [0, 98, 100, 2]);
     const minimum = store.patch('one', { left: -4, top: -2, width: 1, height: 1 });
@@ -167,4 +171,30 @@ test('get reads new external changes on every call and dispose closes the store'
     assert.equal(store.get('one').blur, 22);
     store.dispose();
     assert.throws(() => store.get('one'), /已关闭/);
+});
+
+test('custom shortcuts merge partially across instances, validate strictly and fall back safely when malformed', () => {
+    const localStorage = memoryStorage();
+    const first = createConfigStore({ localStorage });
+    const second = createConfigStore({ localStorage });
+    first.patch('one', { shortcuts: { capture: 'ctrl + shift + k', editMask: '' } });
+    second.patch('two', { shortcuts: { peek: 'shift', reveal: 'Enter' } });
+    assert.deepEqual(first.get('one').shortcuts, {
+        ...DEFAULT_SHORTCUTS,
+        capture: 'Ctrl+Shift+K',
+        editMask: '',
+        peek: 'Shift',
+        reveal: 'Enter'
+    });
+    assert.throws(() => first.patch('one', { shortcuts: 'Alt+S' }), /对象/);
+    assert.throws(() => first.patch('one', { shortcuts: { unknownAction: 'Alt+K' } }), /不支持的快捷键/);
+    assert.throws(() => first.patch('one', { shortcuts: { capture: 'Alt' } }), /格式无效/);
+    assert.throws(() => first.patch('one', { shortcuts: { capture: 'Escape' } }), /格式无效/);
+    assert.throws(() => first.patch('one', JSON.parse('{"shortcuts":{"__proto__":{"polluted":true}}}')), /不安全/);
+    assert.equal({}.polluted, undefined);
+    localStorage.setItem(GLOBAL_KEY, JSON.stringify({ shortcuts: { capture: 'bad', peek: 'Control', rateGood: 'g' } }));
+    const recovered = first.get('one').shortcuts;
+    assert.equal(recovered.capture, DEFAULT_SHORTCUTS.capture);
+    assert.equal(recovered.peek, 'Ctrl');
+    assert.equal(recovered.rateGood, 'G');
 });

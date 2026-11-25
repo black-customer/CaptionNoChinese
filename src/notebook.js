@@ -1,5 +1,6 @@
 import { isDue, orderSession, schedule } from './schedule.js';
 import { getDeepActiveElement, isEditableEvent } from './editable.js';
+import { DEFAULT_SHORTCUTS, formatShortcut, matchesShortcut, normalizeShortcutsMap } from './shortcuts.js';
 
 const PAGE_SIZE = 30;
 const SAVE_DELAY = 550;
@@ -89,7 +90,7 @@ function blobDataUrl(blob) {
 }
 
 /** Non-modal notebook. The caller owns attachment and fullscreen placement. */
-export function createNotebook({ repo, player, notify = () => {}, version = '2.5.0', onChange = () => {}, onLoop, onHelp, onSettings, getLeadIn = () => 3, getBatchSize = () => 20, sessionStorage = null, now = Date.now }) {
+export function createNotebook({ repo, player, notify = () => {}, version = '2.5.0', onChange = () => {}, onLoop, onHelp, onSettings, getLeadIn = () => 3, getBatchSize = () => 20, getShortcuts = () => DEFAULT_SHORTCUTS, sessionStorage = null, now = Date.now }) {
     let opened = false;
     let disposed = false;
     let offset = 0;
@@ -672,12 +673,41 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.5
         return null;
     }
 
+    function currentShortcuts() {
+        return normalizeShortcutsMap(getShortcuts?.());
+    }
+
+    function sessionShortcutHint(keys) {
+        const parts = [];
+        if (keys.reveal) parts.push(`${formatShortcut(keys.reveal)}显示答案`);
+        const rates = [keys.rateAgain, keys.rateHard, keys.rateGood];
+        if (rates.some(Boolean)) parts.push(`${rates.map(spec => spec ? formatShortcut(spec) : '—').join(' / ')} 自评`);
+        return parts.length ? `${parts.join('，')}。` : '';
+    }
+
+    function refreshShortcuts() {
+        if (!revealTarget || !sessionActive()) return;
+        const keys = currentShortcuts();
+        if (revealTarget.shortcutHint) revealTarget.shortcutHint.textContent = sessionShortcutHint(keys);
+        const specs = [keys.rateAgain, keys.rateHard, keys.rateGood];
+        revealTarget.ratingKeys?.forEach((kbd, index) => {
+            const spec = specs[index];
+            kbd.textContent = spec ? formatShortcut(spec) : '';
+            kbd.hidden = !spec;
+        });
+    }
+
     function renderSessionCard(note) {
+        const keys = currentShortcuts();
         const title = node('h3', 'bcm-session-title', `${note.epTitle || note.seriesTitle || '未命名视频'} · ${note.timeStr || timeLabel(note.time)}`);
         title.tabIndex = -1;
         const here = sameSource(note);
         const hint = node('p', 'bcm-session-hint', here ? '先听一遍，回想意思，再看答案。' : '这条收藏在其他视频里。回听会跳转过去，页面就绪后自动继续复习。');
-        if (here) hint.append(node('span', 'bcm-nowrap', '空格显示答案，1 / 2 / 3 自评。'));
+        let shortcutHint = null;
+        if (here) {
+            shortcutHint = node('span', 'bcm-nowrap', sessionShortcutHint(keys));
+            hint.append(shortcutHint);
+        }
         const playback = node('div', 'bcm-playback-row');
         const playButton = button('回听', () => sessionPlay(note, false, playButton), 'bcm-button-primary bcm-play-button');
         playButton.title = `从收藏时间前 ${leadInFor(note)} 秒开始回听`;
@@ -700,17 +730,22 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.5
         // Each choice says when the card comes back, so the ladder is visible without explaining an algorithm.
         const upcoming = schedule(note, 'good');
         const hints = { again: '稍后再来', hard: '明天再来', good: upcoming.reviewState === 'mastered' ? '记为已掌握' : `${upcoming.interval} 天后再来` };
+        const ratingSpecs = [keys.rateAgain, keys.rateHard, keys.rateGood];
+        const ratingKeys = [];
         RATING_CHOICES.forEach(([rating, label], position) => {
             const choice = button('', () => rate(rating), 'bcm-rating');
             choice.dataset.rating = rating;
             choice.setAttribute('aria-label', `${label}，${hints[rating]}`);
             const name = node('span', 'bcm-rating-label');
-            name.append(node('kbd', '', String(position + 1)), node('span', '', label));
+            const kbd = node('kbd', '', ratingSpecs[position] ? formatShortcut(ratingSpecs[position]) : '');
+            kbd.hidden = !ratingSpecs[position];
+            ratingKeys.push(kbd);
+            name.append(kbd, node('span', '', label));
             choice.append(name, node('small', '', hints[rating]));
             ratings.append(choice);
         });
         sessionCard.replaceChildren(title, hint, playback, revealButton, answer, ratings);
-        revealTarget = { title, revealButton, answer, ratings };
+        revealTarget = { title, revealButton, answer, ratings, shortcutHint, ratingKeys };
         title.focus({ preventScroll: true });
     }
 
@@ -826,15 +861,22 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.5
     }
 
     function onSessionKey(event) {
-        if (!sessionActive() || event.isComposing || event.repeat || event.ctrlKey || event.metaKey || event.altKey || isEditableEvent(event)) return;
+        if (!sessionActive() || event.isComposing || event.repeat || isEditableEvent(event)) return;
         const deepActive = getDeepActiveElement();
         if (insideOverlayPanel(event.target) || insideOverlayPanel(deepActive)) return;
-        const rating = RATING_CHOICES[Number(event.key) - 1];
-        if (revealed && rating) {
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            void rate(rating[0]);
-        } else if (event.key === ' ' && !revealed && !isInteractiveControl(event.target) && !isInteractiveControl(deepActive)) {
+        const keys = currentShortcuts();
+        if (revealed) {
+            const ratingSpecs = [keys.rateAgain, keys.rateHard, keys.rateGood];
+            const index = ratingSpecs.findIndex(spec => matchesShortcut(event, spec));
+            if (index >= 0) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                void rate(RATING_CHOICES[index][0]);
+            }
+            return;
+        }
+        if (matchesShortcut(event, keys.reveal)) {
+            if ((keys.reveal === 'Space' || keys.reveal === 'Enter') && (isInteractiveControl(event.target) || isInteractiveControl(deepActive))) return;
             event.preventDefault();
             event.stopImmediatePropagation();
             reveal();
@@ -1027,5 +1069,5 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.5
         element.remove();
     }
 
-    return { element, open, close, toggle: () => opened ? close() : open(), refresh, refreshDue, resumeSession, dispose, isOpen: () => opened, flushDrafts };
+    return { element, open, close, toggle: () => opened ? close() : open(), refresh, refreshDue, refreshShortcuts, resumeSession, dispose, isOpen: () => opened, flushDrafts };
 }

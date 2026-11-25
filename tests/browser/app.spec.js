@@ -301,3 +301,85 @@ test('typing inside shadow DOM comment box and reply box does not trigger shortc
   await dockClick(page, 'notebook');
   await expect(page.locator('.bcm-note')).toHaveCount(0);
 });
+
+test('custom shortcuts can be recorded, conflict-checked, disabled, persisted and used', async ({ page }) => {
+  await boot(page);
+  await dockClick(page, 'version');
+  await expect(page.locator('.bcm-panel')).toBeVisible();
+
+  const captureKey = page.getByLabel('收藏此句快捷键', { exact: true });
+  await captureKey.click();
+  await expect(captureKey).toHaveValue('请按下快捷键…');
+  await page.keyboard.press('Control+Shift+KeyK');
+  await expect(captureKey).toHaveValue('Ctrl + Shift + K');
+
+  // Recording the same shortcut on another global action must be blocked on save.
+  const notebookKey = page.getByLabel('开关复习本快捷键', { exact: true });
+  await notebookKey.click();
+  await page.keyboard.press('Control+Shift+KeyK');
+  await page.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(page.locator('.bcm-notification')).toContainText('快捷键冲突');
+  await expect(page.locator('.bcm-panel')).toBeVisible();
+
+  // Fix conflict, disable editMask, customize peek and session review shortcuts.
+  await notebookKey.click();
+  await page.keyboard.press('Alt+KeyJ');
+  await expect(notebookKey).toHaveValue('Alt + J');
+  await page.getByRole('button', { name: '禁用遮罩编辑快捷键', exact: true }).click();
+  await expect(page.getByLabel('遮罩编辑快捷键', { exact: true })).toHaveValue('已禁用');
+
+  const peekKey = page.getByLabel('按住临时查看中文快捷键', { exact: true });
+  await peekKey.click();
+  await page.keyboard.press('KeyV');
+  await expect(peekKey).toHaveValue('V');
+
+  const revealKey = page.getByLabel('复习时显示答案快捷键', { exact: true });
+  await revealKey.click();
+  await page.keyboard.press('KeyE');
+  const goodKey = page.getByLabel('复习自评：听懂了快捷键', { exact: true });
+  await goodKey.click();
+  await page.keyboard.press('KeyD');
+
+  // Verify narrow viewport has no horizontal overflow in Settings panel with shortcut section.
+  await page.setViewportSize({ width: 390, height: 780 });
+  const panelOverflow = await page.locator('.bcm-panel').evaluate(el => el.scrollWidth > el.clientWidth + 1);
+  expect(panelOverflow).toBe(false);
+  await page.setViewportSize({ width: 1280, height: 850 });
+
+  await page.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(page.locator('.bcm-panel')).toBeHidden();
+
+  // Reload and verify custom shortcuts persist and replace old bindings.
+  await page.reload();
+  await expect(page.locator('.bcm-dock')).toBeVisible();
+  await page.waitForFunction(() => document.querySelector('video').readyState >= 2);
+  await page.locator('h1').click();
+
+  // Old single-key 's' and disabled Alt+Z must not trigger.
+  await page.keyboard.press('s');
+  await page.keyboard.press('Alt+KeyZ');
+  await expect(page.locator('.bcm-mask')).not.toHaveClass(/bcm-edit/);
+  await expect(page.locator('.bcm-notification')).not.toContainText('已收藏');
+
+  // Custom peek key 'V' reveals while held and restores on release.
+  await page.keyboard.down('KeyV');
+  await expect(page.locator('.bcm-mask')).toHaveClass(/bcm-peek/);
+  await page.keyboard.up('KeyV');
+  await expect(page.locator('.bcm-mask')).not.toHaveClass(/bcm-peek/);
+
+  // Custom capture & notebook shortcuts work.
+  await page.keyboard.press('Control+Shift+KeyK');
+  await expect(page.locator('.bcm-notification')).toContainText('已收藏');
+  await page.keyboard.press('Alt+KeyJ');
+  await expect(page.locator('.bcm-notebook')).toBeVisible();
+
+  // Custom review session shortcuts work.
+  await startSitting(page);
+  await expect(sitting(page)).toContainText('E显示答案');
+  await page.keyboard.press('Space');
+  await expect(sitting(page).locator('.bcm-session-answer')).toBeHidden();
+  await page.keyboard.press('KeyE');
+  await expect(sitting(page).locator('.bcm-session-answer')).toBeVisible();
+  await page.keyboard.press('KeyD');
+  await expect(sitting(page).locator('.bcm-session-title')).toHaveText('本轮复习完成');
+});

@@ -5,6 +5,7 @@ import { createNotebook } from './notebook.js';
 import { createReviewController } from './review.js';
 import { nextRollover } from './schedule.js';
 import { isEditableEvent as editable } from './editable.js';
+import { DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS, eventToShortcut, findShortcutConflict, formatShortcut, matchesPeekRelease, matchesShortcut } from './shortcuts.js';
 import appStyles from './app.css';
 import notebookStyles from './notebook.css';
 
@@ -61,18 +62,26 @@ function start() {
     panel.hidden = false; panel.inert = false; wakeDock();
   }
   function showHelp() {
+    const currentCfg = settings.get(snapshot?.identity.seriesId || 'global_default');
+    const sc = currentCfg.shortcuts || DEFAULT_SHORTCUTS;
+    const captureKey = sc.capture === DEFAULT_SHORTCUTS.capture && currentCfg.singleKeys ? `${formatShortcut(sc.capture)} / S` : formatShortcut(sc.capture);
+    const notebookKey = sc.notebook === DEFAULT_SHORTCUTS.notebook && currentCfg.singleKeys ? `${formatShortcut(sc.notebook)} / B` : formatShortcut(sc.notebook);
+    const toggleKey = sc.toggleMask === DEFAULT_SHORTCUTS.toggleMask ? `${formatShortcut(sc.toggleMask)} / Shift + C` : formatShortcut(sc.toggleMask);
+    const editKey = sc.editMask === DEFAULT_SHORTCUTS.editMask ? `${formatShortcut(sc.editMask)} / Shift + Z` : formatShortcut(sc.editMask);
+    const peekKey = sc.peek ? `悬停遮罩 / 按住 ${formatShortcut(sc.peek)}` : '悬停遮罩';
+    const rateKeys = [sc.rateAgain, sc.rateHard, sc.rateGood].map(formatShortcut).join(' / ');
     showPanel(`看剧学英语 v${VERSION}`);
-    panel.append(el('p', '', '先遮中文听一遍；遇到难句收藏，再回到原片段复听。'));
+    panel.append(el('p', '', '先遮中文听一遍；遇到难句收藏，再回到原片段复听。所有快捷键均可在「设置」中自定义或禁用。'));
     const list = el('dl');
     for (const [key, desc] of [
-      ['Alt + S / S', '收藏当前画面与来源时间；关闭单字母快捷键后，仅 Alt 组合有效。'],
-      ['Alt + B / B', '打开场景复习本，搜索、标记掌握或导出备份。'],
+      [captureKey, '收藏当前画面与来源时间；关闭单字母快捷键或自定义键位后，按设置的快捷键生效。'],
+      [notebookKey, '打开场景复习本，搜索、标记掌握或导出备份。'],
       ['Alt + 滚轮', '只在播放器内微调遮罩高度。'],
-      ['悬停遮罩 / 按住 Alt', '临时看清中文，移开或松键恢复。'],
-      ['Alt + Z / Shift + Z', '进入或退出拖动、拉伸模式。'],
-      ['Alt + C / Shift + C', '开关中文字幕遮罩。'],
+      [peekKey, '临时看清中文，移开或松键恢复。'],
+      [editKey, '进入或退出拖动、拉伸模式。'],
+      [toggleKey, '开关中文字幕遮罩。'],
       ['循环复听', '以收藏点前后几秒为区间，完成后返回开始复习前的进度。'],
-      ['到期复习', '复习本顶部点“开始复习”：先听、回想，空格显示答案，再按 1 / 2 / 3 自评，下次复习按间隔排期。'],
+      ['到期复习', `复习本顶部点“开始复习”：先听、回想，${formatShortcut(sc.reveal)}显示答案，再按 ${rateKeys} 自评，下次复习按间隔排期。`],
     ]) list.append(el('dt', '', key), el('dd', '', desc));
     panel.append(list, el('p', '', '收藏只保存在当前浏览器的本机数据中。建议定期在复习本导出 JSON 备份；HTML 用于离线阅读。'));
     const done = button('开始看剧', closePanel, 'bcm-primary'); panel.append(done); done.focus();
@@ -81,7 +90,7 @@ function start() {
     if (!snapshot) return;
     config = settings.get(snapshot.identity.seriesId);
     showPanel('遮罩与复习设置');
-    panel.append(el('p', '', `v${VERSION} · 位置按剧集记忆，其他偏好全局生效。`));
+    panel.append(el('p', '', `v${VERSION} · 位置按剧集记忆，其他偏好与快捷键全局生效。`));
     const form = el('form'); const inputs = new Map();
     const add = (key, label, type, min, max, step) => {
       const row = el('label'); row.append(el('span', '', label));
@@ -105,6 +114,77 @@ function start() {
     add('loopGap', '循环间隔（秒）', 'number', 0, 10, .5);
     add('playbackRate', '复听倍速', 'number', .5, 2, .25);
     add('reviewBatch', '每组复习条数', 'number', 5, 100);
+    const shortcutDrafts = { ...DEFAULT_SHORTCUTS, ...(config.shortcuts || {}) };
+    const shortcutInputs = new Map();
+    const shortcutSection = el('fieldset', 'bcm-shortcut-section');
+    const shortcutHeader = el('div', 'bcm-shortcut-header');
+    shortcutHeader.append(el('legend', '', '快捷键设置'), button('恢复默认快捷键', () => {
+      Object.assign(shortcutDrafts, DEFAULT_SHORTCUTS);
+      for (const action of SHORTCUT_ACTIONS) {
+        const input = shortcutInputs.get(action.id);
+        if (input) input.value = formatShortcut(shortcutDrafts[action.id]);
+      }
+    }, 'bcm-shortcut-reset'));
+    shortcutSection.append(shortcutHeader, el('p', 'bcm-shortcut-hint', '点击按键框后直接按下新组合键；按 Esc 取消录入，点「禁用」可关闭冲突键位。'));
+    for (const action of SHORTCUT_ACTIONS) {
+      const row = el('div', 'bcm-shortcut-row');
+      const id = `bcm-shortcut-${action.id}`;
+      const label = el('label', 'bcm-shortcut-label', action.label);
+      label.htmlFor = id;
+      const control = el('div', 'bcm-shortcut-control');
+      const input = el('input', 'bcm-shortcut-input');
+      input.id = id;
+      input.type = 'text';
+      input.readOnly = true;
+      input.dataset.shortcutAction = action.id;
+      input.setAttribute('aria-label', `${action.label}快捷键`);
+      input.value = formatShortcut(shortcutDrafts[action.id]);
+      let recordedModifierOnly = false;
+      input.addEventListener('focus', () => {
+        recordedModifierOnly = false;
+        input.dataset.recording = 'true';
+        input.value = '请按下快捷键…';
+      });
+      input.addEventListener('blur', () => {
+        delete input.dataset.recording;
+        input.value = formatShortcut(shortcutDrafts[action.id]);
+      });
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Tab' && !event.ctrlKey && !event.altKey && !event.metaKey) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.key === 'Escape') { input.blur(); return; }
+        if (event.isComposing || event.repeat) return;
+        const spec = eventToShortcut(event, { allowModifierOnly: action.allowModifierOnly });
+        if (!spec) return;
+        shortcutDrafts[action.id] = spec;
+        input.value = formatShortcut(spec);
+        if (action.allowModifierOnly && ['Alt', 'Shift', 'Ctrl'].includes(spec)) {
+          recordedModifierOnly = true;
+        } else {
+          recordedModifierOnly = false;
+          input.blur();
+        }
+      });
+      input.addEventListener('keyup', event => {
+        if (recordedModifierOnly && input.dataset.recording === 'true') {
+          event.preventDefault();
+          event.stopPropagation();
+          recordedModifierOnly = false;
+          input.blur();
+        }
+      });
+      const clearBtn = button('禁用', () => {
+        shortcutDrafts[action.id] = '';
+        input.value = formatShortcut('');
+      }, 'bcm-shortcut-clear');
+      clearBtn.setAttribute('aria-label', `禁用${action.label}快捷键`);
+      control.append(input, clearBtn);
+      row.append(label, control);
+      shortcutSection.append(row);
+      shortcutInputs.set(action.id, input);
+    }
+    form.append(shortcutSection);
     const actions = el('div', 'bcm-panel-actions');
     const submit = el('button', 'bcm-primary', '保存设置'); submit.type = 'submit';
     actions.append(submit, button('重置本剧位置', () => {
@@ -114,7 +194,13 @@ function start() {
       event.preventDefault(); const patch = {};
       for (const [key, input] of inputs) patch[key] = input.type === 'checkbox' ? input.checked : input.tagName === 'SELECT' ? input.value : Number(input.value);
       if (patch.loopBefore + patch.loopAfter <= 0) { notify('循环区间需要大于 0 秒', { kind: 'error' }); return; }
-      try { config = settings.patch(snapshot.identity.seriesId, patch); paint(); closePanel(); notify('设置已保存'); } catch (error) { fail(error); }
+      const conflict = findShortcutConflict(shortcutDrafts);
+      if (conflict) {
+        notify(`快捷键冲突：「${conflict.first.label}」与「${conflict.second.label}」不能同为 ${formatShortcut(conflict.shortcut)}`, { kind: 'error' });
+        return;
+      }
+      patch.shortcuts = { ...shortcutDrafts };
+      try { config = settings.patch(snapshot.identity.seriesId, patch); paint(); notebook.refreshShortcuts(); closePanel(); notify('设置已保存'); } catch (error) { fail(error); }
     });
     panel.append(form); inputs.get('mode').focus();
   }
@@ -129,6 +215,7 @@ function start() {
     sessionStorage: session,
     getLeadIn: () => settings.get(snapshot?.identity.seriesId || 'global_default').leadIn,
     getBatchSize: () => settings.get(snapshot?.identity.seriesId || 'global_default').reviewBatch,
+    getShortcuts: () => settings.get(snapshot?.identity.seriesId || 'global_default').shortcuts,
     onHelp: showHelp, onSettings: showSettings, onLoop: async note => {
       config = settings.get(snapshot?.identity.seriesId || note.seriesId);
       return review.start(note, { before: config.loopBefore, after: config.loopAfter, count: config.loopCount, gap: config.loopGap, rate: config.playbackRate });
@@ -327,25 +414,35 @@ function start() {
     wheelTimer = setTimeout(() => { wheeling = false; paint(); }, 600);
   }, { capture: true, passive: false, signal: events.signal });
   window.addEventListener('keydown', event => {
+    if (event.target?.dataset?.shortcutAction) return;
     if (event.key === 'Escape') {
       if (!panel.hidden) { event.stopPropagation(); closePanel(); }
       else if (notebook.isOpen()) { event.stopPropagation(); notebook.close().catch(fail); }
       else if (edit) { edit = false; cancelDrag(); paint(); }
       return;
     }
-    if (!snapshot || editable(event) || event.isComposing || event.ctrlKey || event.metaKey) return;
-    if (event.key === 'Alt') { peek = true; paint(); return; }
+    if (!snapshot || !panel.hidden || editable(event) || event.isComposing) return;
+    const shortcuts = config.shortcuts || DEFAULT_SHORTCUTS;
+    if (shortcuts.peek && matchesShortcut(event, shortcuts.peek, { allowModifierOnly: true })) {
+      if (!peek) { peek = true; paint(); }
+      if (!['Alt', 'Shift', 'Ctrl'].includes(shortcuts.peek)) { event.preventDefault(); event.stopImmediatePropagation(); }
+      return;
+    }
     if (event.repeat) return;
-    const key = (event.code?.replace(/^Key/, '') || event.key).toUpperCase();
-    const oneKey = config.singleKeys && !event.altKey && !event.shiftKey;
     let action;
-    if ((event.altKey || oneKey) && key === 'S') action = capture;
-    if ((event.altKey || oneKey) && key === 'B') action = () => notebook.toggle().catch(fail);
-    if ((event.altKey || event.shiftKey) && key === 'C') action = toggleMask;
-    if ((event.altKey || event.shiftKey) && key === 'Z') action = toggleEdit;
+    if (matchesShortcut(event, shortcuts.capture)) action = capture;
+    else if (matchesShortcut(event, shortcuts.notebook)) action = () => notebook.toggle().catch(fail);
+    else if (matchesShortcut(event, shortcuts.toggleMask)) action = toggleMask;
+    else if (matchesShortcut(event, shortcuts.editMask)) action = toggleEdit;
+    else if (config.singleKeys && shortcuts.capture === DEFAULT_SHORTCUTS.capture && matchesShortcut(event, 'S')) action = capture;
+    else if (config.singleKeys && shortcuts.notebook === DEFAULT_SHORTCUTS.notebook && matchesShortcut(event, 'B')) action = () => notebook.toggle().catch(fail);
+    else if (shortcuts.toggleMask === DEFAULT_SHORTCUTS.toggleMask && matchesShortcut(event, 'Shift+C')) action = toggleMask;
+    else if (shortcuts.editMask === DEFAULT_SHORTCUTS.editMask && matchesShortcut(event, 'Shift+Z')) action = toggleEdit;
     if (action) { event.preventDefault(); event.stopImmediatePropagation(); try { action(); } catch (error) { fail(error); } wakeDock(); }
   }, { capture: true, signal: events.signal });
-  window.addEventListener('keyup', event => { if (event.key === 'Alt') { peek = false; paint(); } }, { signal: events.signal });
+  window.addEventListener('keyup', event => {
+    if (peek && matchesPeekRelease(event, config?.shortcuts?.peek ?? DEFAULT_SHORTCUTS.peek)) { peek = false; paint(); }
+  }, { signal: events.signal });
   window.addEventListener('blur', () => { peek = false; cancelDrag(); paint(); }, { signal: events.signal });
   document.addEventListener('fullscreenchange', fullscreen, { signal: events.signal });
   window.addEventListener('resize', schedulePaint, { passive: true, signal: events.signal });

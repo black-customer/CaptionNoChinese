@@ -1336,10 +1336,240 @@
     return { getCurrent, getTime, capture, seek, resumePendingSeek, getVideoRect, subscribe, dispose };
   }
 
+  // src/shortcuts.js
+  var MODIFIER_ORDER = ["Ctrl", "Alt", "Shift", "Meta"];
+  var MODIFIER_ALIAS = {
+    ctrl: "Ctrl",
+    control: "Ctrl",
+    alt: "Alt",
+    option: "Alt",
+    shift: "Shift",
+    meta: "Meta",
+    cmd: "Meta",
+    command: "Meta",
+    win: "Meta",
+    super: "Meta"
+  };
+  var MODIFIER_ONLY_KEYS = /* @__PURE__ */ new Set(["Ctrl", "Alt", "Shift"]);
+  var SPECIAL_CODES = {
+    Space: "Space",
+    Enter: "Enter",
+    Tab: "Tab",
+    Backspace: "Backspace",
+    Delete: "Delete",
+    Home: "Home",
+    End: "End",
+    PageUp: "PageUp",
+    PageDown: "PageDown",
+    ArrowUp: "ArrowUp",
+    ArrowDown: "ArrowDown",
+    ArrowLeft: "ArrowLeft",
+    ArrowRight: "ArrowRight",
+    Minus: "Minus",
+    Equal: "Equal",
+    BracketLeft: "BracketLeft",
+    BracketRight: "BracketRight",
+    Backslash: "Backslash",
+    Semicolon: "Semicolon",
+    Quote: "Quote",
+    Backquote: "Backquote",
+    Comma: "Comma",
+    Period: "Period",
+    Slash: "Slash"
+  };
+  var SPECIAL_KEYS = {
+    " ": "Space",
+    spacebar: "Space",
+    space: "Space",
+    enter: "Enter",
+    tab: "Tab",
+    backspace: "Backspace",
+    delete: "Delete",
+    del: "Delete",
+    home: "Home",
+    end: "End",
+    pageup: "PageUp",
+    pagedown: "PageDown",
+    arrowup: "ArrowUp",
+    up: "ArrowUp",
+    arrowdown: "ArrowDown",
+    down: "ArrowDown",
+    arrowleft: "ArrowLeft",
+    left: "ArrowLeft",
+    arrowright: "ArrowRight",
+    right: "ArrowRight",
+    "-": "Minus",
+    minus: "Minus",
+    "=": "Equal",
+    equal: "Equal",
+    "[": "BracketLeft",
+    bracketleft: "BracketLeft",
+    "]": "BracketRight",
+    bracketright: "BracketRight",
+    "\\": "Backslash",
+    backslash: "Backslash",
+    ";": "Semicolon",
+    semicolon: "Semicolon",
+    "'": "Quote",
+    quote: "Quote",
+    "`": "Backquote",
+    backquote: "Backquote",
+    ",": "Comma",
+    comma: "Comma",
+    ".": "Period",
+    period: "Period",
+    "/": "Slash",
+    slash: "Slash"
+  };
+  var DISPLAY_KEYS = {
+    Space: "空格",
+    ArrowUp: "↑",
+    ArrowDown: "↓",
+    ArrowLeft: "←",
+    ArrowRight: "→",
+    Minus: "-",
+    Equal: "=",
+    BracketLeft: "[",
+    BracketRight: "]",
+    Backslash: "\\",
+    Semicolon: ";",
+    Quote: "'",
+    Backquote: "`",
+    Comma: ",",
+    Period: ".",
+    Slash: "/"
+  };
+  var SHORTCUT_ACTIONS = Object.freeze([
+    { id: "capture", label: "收藏此句", scope: "global", allowModifierOnly: false },
+    { id: "notebook", label: "开关复习本", scope: "global", allowModifierOnly: false },
+    { id: "toggleMask", label: "开关遮罩", scope: "global", allowModifierOnly: false },
+    { id: "editMask", label: "遮罩编辑", scope: "global", allowModifierOnly: false },
+    { id: "peek", label: "按住临时查看中文", scope: "global", allowModifierOnly: true },
+    { id: "reveal", label: "复习时显示答案", scope: "session", allowModifierOnly: false },
+    { id: "rateAgain", label: "复习自评：没听懂", scope: "session", allowModifierOnly: false },
+    { id: "rateHard", label: "复习自评：费劲", scope: "session", allowModifierOnly: false },
+    { id: "rateGood", label: "复习自评：听懂了", scope: "session", allowModifierOnly: false }
+  ]);
+  var DEFAULT_SHORTCUTS = Object.freeze({
+    capture: "Alt+S",
+    notebook: "Alt+B",
+    toggleMask: "Alt+C",
+    editMask: "Alt+Z",
+    peek: "Alt",
+    reveal: "Space",
+    rateAgain: "1",
+    rateHard: "2",
+    rateGood: "3"
+  });
+  function normalizeMainKey(token) {
+    if (typeof token !== "string") return null;
+    if (token === " ") return "Space";
+    const trimmed = token.trim();
+    if (!trimmed) return null;
+    if (/^[a-zA-Z]$/.test(trimmed)) return trimmed.toUpperCase();
+    if (/^[0-9]$/.test(trimmed)) return trimmed;
+    if (/^F([1-9]|1[0-2])$/i.test(trimmed)) return trimmed.toUpperCase();
+    return SPECIAL_KEYS[trimmed.toLowerCase()] || null;
+  }
+  function normalizeShortcut(value, { allowModifierOnly = false } = {}) {
+    if (typeof value !== "string") return null;
+    const raw = value.trim();
+    if (!raw) return "";
+    if (raw.length > 64) return null;
+    const parts = raw.split(/\s*\+\s*/);
+    if (parts.some((part) => !part)) return null;
+    if (parts.length === 1) {
+      const mod = MODIFIER_ALIAS[parts[0].toLowerCase()];
+      if (mod) return allowModifierOnly && MODIFIER_ONLY_KEYS.has(mod) ? mod : null;
+      return normalizeMainKey(parts[0]);
+    }
+    const mods = /* @__PURE__ */ new Set();
+    for (let i = 0; i < parts.length - 1; i++) {
+      const mod = MODIFIER_ALIAS[parts[i].toLowerCase()];
+      if (!mod || mods.has(mod)) return null;
+      mods.add(mod);
+    }
+    const key = normalizeMainKey(parts[parts.length - 1]);
+    if (!key) return null;
+    const ordered = MODIFIER_ORDER.filter((mod) => mods.has(mod));
+    return [...ordered, key].join("+");
+  }
+  function normalizeShortcutsMap(input) {
+    const output = { ...DEFAULT_SHORTCUTS };
+    if (!input || typeof input !== "object" || Array.isArray(input)) return output;
+    for (const action of SHORTCUT_ACTIONS) {
+      if (!Object.hasOwn(input, action.id)) continue;
+      const normalized = normalizeShortcut(input[action.id], { allowModifierOnly: action.allowModifierOnly });
+      if (normalized !== null) output[action.id] = normalized;
+    }
+    return output;
+  }
+  function keyTokenFromEvent(event) {
+    const code = typeof event?.code === "string" ? event.code : "";
+    if (/^Key([A-Z])$/.test(code)) return code.slice(3);
+    if (/^(?:Digit|Numpad)([0-9])$/.test(code)) return code.slice(-1);
+    if (/^F([1-9]|1[0-2])$/.test(code)) return code;
+    if (SPECIAL_CODES[code]) return SPECIAL_CODES[code];
+    const key = typeof event?.key === "string" ? event.key : "";
+    if (!key) return null;
+    const mod = MODIFIER_ALIAS[key.toLowerCase()];
+    if (mod) return mod;
+    return normalizeMainKey(key);
+  }
+  function eventToShortcut(event, { allowModifierOnly = false } = {}) {
+    if (!event) return null;
+    const token = keyTokenFromEvent(event);
+    if (!token) return null;
+    if (MODIFIER_ORDER.includes(token)) {
+      if (!allowModifierOnly || !MODIFIER_ONLY_KEYS.has(token)) return null;
+      const otherMods = token !== "Ctrl" && Boolean(event.ctrlKey) || token !== "Alt" && Boolean(event.altKey) || token !== "Shift" && Boolean(event.shiftKey) || Boolean(event.metaKey);
+      return otherMods ? null : token;
+    }
+    const mods = [];
+    if (event.ctrlKey) mods.push("Ctrl");
+    if (event.altKey) mods.push("Alt");
+    if (event.shiftKey) mods.push("Shift");
+    if (event.metaKey) mods.push("Meta");
+    return mods.length ? `${mods.join("+")}+${token}` : token;
+  }
+  function matchesShortcut(event, spec, { allowModifierOnly = false } = {}) {
+    if (!spec) return false;
+    const actual = eventToShortcut(event, { allowModifierOnly });
+    return actual !== null && actual === spec;
+  }
+  function matchesPeekRelease(event, spec) {
+    if (!spec) return false;
+    const token = keyTokenFromEvent(event);
+    if (!token) return false;
+    if (MODIFIER_ONLY_KEYS.has(spec)) return token === spec;
+    const parts = spec.split("+");
+    return parts.includes(token);
+  }
+  function formatShortcut(spec) {
+    if (!spec) return "已禁用";
+    return spec.split("+").map((part) => DISPLAY_KEYS[part] || part).join(" + ");
+  }
+  function findShortcutConflict(shortcuts) {
+    for (const scope of ["global", "session"]) {
+      const seen = /* @__PURE__ */ new Map();
+      for (const action of SHORTCUT_ACTIONS) {
+        if (action.scope !== scope) continue;
+        const value = shortcuts?.[action.id];
+        if (!value) continue;
+        if (seen.has(value)) {
+          return { first: seen.get(value), second: action, shortcut: value };
+        }
+        seen.set(value, action);
+      }
+    }
+    return null;
+  }
+
   // src/config.js
   var LEGACY_KEY2 = "bili_caption_mask_v200_cfg";
   var GLOBAL_KEY = "bili_caption_mask_v240_global";
   var SERIES_PREFIX = "bili_caption_mask_v240_series:";
+  var SHORTCUT_META = new Map(SHORTCUT_ACTIONS.map((action) => [action.id, action]));
   var DEFAULTS = Object.freeze({
     enabled: true,
     left: 15,
@@ -1355,7 +1585,8 @@
     loopCount: 3,
     loopGap: 0,
     playbackRate: 1,
-    reviewBatch: 20
+    reviewBatch: 20,
+    shortcuts: DEFAULT_SHORTCUTS
   });
   var GEOMETRY = /* @__PURE__ */ new Set(["left", "top", "width", "height"]);
   var BOOLEANS = /* @__PURE__ */ new Set(["enabled", "singleKeys"]);
@@ -1396,10 +1627,12 @@
     }
   }
   function normalize(input) {
-    const output = { ...DEFAULTS };
+    const output = { ...DEFAULTS, shortcuts: { ...DEFAULT_SHORTCUTS } };
     for (const key of Object.keys(DEFAULTS)) {
       const value = input?.[key];
-      if (BOOLEANS.has(key)) {
+      if (key === "shortcuts") {
+        output.shortcuts = normalizeShortcutsMap(value);
+      } else if (BOOLEANS.has(key)) {
         if (typeof value === "boolean") output[key] = value;
       } else if (key === "mode") {
         if (value === "blur" || value === "solid") output[key] = value;
@@ -1417,7 +1650,10 @@
     return Object.fromEntries([...GEOMETRY].map((key) => [key, config[key]]));
   }
   function onlyGlobal(config) {
-    return Object.fromEntries(Object.keys(DEFAULTS).filter((key) => !GEOMETRY.has(key)).map((key) => [key, config[key]]));
+    return Object.fromEntries(Object.keys(DEFAULTS).filter((key) => !GEOMETRY.has(key)).map((key) => [
+      key,
+      key === "shortcuts" ? { ...config.shortcuts } : config[key]
+    ]));
   }
   function createConfigStore(options = {}) {
     const gmGet = options.gmGet;
@@ -1503,17 +1739,34 @@
       for (const [key, value] of Object.entries(changes)) {
         if (!Object.hasOwn(DEFAULTS, key)) throw new Error(`不支持的设置项：${key}`);
         if (value === void 0) continue;
-        if (BOOLEANS.has(key)) {
+        if (key === "shortcuts") {
+          if (!isPlain(value)) throw new Error("快捷键设置必须是对象");
+          const normalized = {};
+          for (const [action, spec] of Object.entries(value)) {
+            const meta = SHORTCUT_META.get(action);
+            if (!meta) throw new Error(`不支持的快捷键项：${action}`);
+            if (spec === void 0) continue;
+            const canonical = normalizeShortcut(spec, { allowModifierOnly: meta.allowModifierOnly });
+            if (canonical === null) throw new Error(`快捷键 ${action} 格式无效`);
+            normalized[action] = canonical;
+          }
+          accepted.shortcuts = normalized;
+        } else if (BOOLEANS.has(key)) {
           if (typeof value !== "boolean") throw new Error(`设置 ${key} 必须是开关值`);
+          accepted[key] = value;
         } else if (key === "mode") {
           if (value !== "blur" && value !== "solid") throw new Error("遮罩模式必须是 blur 或 solid");
+          accepted[key] = value;
         } else if (typeof value !== "number" || !Number.isFinite(value)) {
           throw new Error(`设置 ${key} 必须是有效数字`);
+        } else {
+          accepted[key] = value;
         }
-        accepted[key] = value;
       }
       const current = get(seriesId);
-      const result = normalize({ ...current, ...accepted });
+      const merged = { ...current, ...accepted };
+      if (accepted.shortcuts) merged.shortcuts = { ...current.shortcuts, ...accepted.shortcuts };
+      const result = normalize(merged);
       const keys = Object.keys(accepted);
       if (keys.some((key) => GEOMETRY.has(key))) write(seriesKey(seriesId), onlyGeometry(result));
       if (keys.some((key) => !GEOMETRY.has(key))) write(GLOBAL_KEY, onlyGlobal(result));
@@ -1648,7 +1901,7 @@
   }
   function createNotebook({ repo, player, notify = () => {
   }, version = "2.5.0", onChange = () => {
-  }, onLoop, onHelp, onSettings, getLeadIn = () => 3, getBatchSize = () => 20, sessionStorage = null, now = Date.now }) {
+  }, onLoop, onHelp, onSettings, getLeadIn = () => 3, getBatchSize = () => 20, getShortcuts = () => DEFAULT_SHORTCUTS, sessionStorage = null, now = Date.now }) {
     let opened = false;
     let disposed = false;
     let offset = 0;
@@ -2235,12 +2488,38 @@
       if (generation === sessionGeneration) finishSession();
       return null;
     }
+    function currentShortcuts() {
+      return normalizeShortcutsMap(getShortcuts?.());
+    }
+    function sessionShortcutHint(keys) {
+      const parts = [];
+      if (keys.reveal) parts.push(`${formatShortcut(keys.reveal)}显示答案`);
+      const rates = [keys.rateAgain, keys.rateHard, keys.rateGood];
+      if (rates.some(Boolean)) parts.push(`${rates.map((spec) => spec ? formatShortcut(spec) : "—").join(" / ")} 自评`);
+      return parts.length ? `${parts.join("，")}。` : "";
+    }
+    function refreshShortcuts() {
+      if (!revealTarget || !sessionActive()) return;
+      const keys = currentShortcuts();
+      if (revealTarget.shortcutHint) revealTarget.shortcutHint.textContent = sessionShortcutHint(keys);
+      const specs = [keys.rateAgain, keys.rateHard, keys.rateGood];
+      revealTarget.ratingKeys?.forEach((kbd, index) => {
+        const spec = specs[index];
+        kbd.textContent = spec ? formatShortcut(spec) : "";
+        kbd.hidden = !spec;
+      });
+    }
     function renderSessionCard(note) {
+      const keys = currentShortcuts();
       const title2 = node("h3", "bcm-session-title", `${note.epTitle || note.seriesTitle || "未命名视频"} · ${note.timeStr || timeLabel(note.time)}`);
       title2.tabIndex = -1;
       const here = sameSource(note);
       const hint = node("p", "bcm-session-hint", here ? "先听一遍，回想意思，再看答案。" : "这条收藏在其他视频里。回听会跳转过去，页面就绪后自动继续复习。");
-      if (here) hint.append(node("span", "bcm-nowrap", "空格显示答案，1 / 2 / 3 自评。"));
+      let shortcutHint = null;
+      if (here) {
+        shortcutHint = node("span", "bcm-nowrap", sessionShortcutHint(keys));
+        hint.append(shortcutHint);
+      }
       const playback = node("div", "bcm-playback-row");
       const playButton = button("回听", () => sessionPlay(note, false, playButton), "bcm-button-primary bcm-play-button");
       playButton.title = `从收藏时间前 ${leadInFor(note)} 秒开始回听`;
@@ -2262,17 +2541,22 @@
       ratings.hidden = true;
       const upcoming = schedule(note, "good");
       const hints = { again: "稍后再来", hard: "明天再来", good: upcoming.reviewState === "mastered" ? "记为已掌握" : `${upcoming.interval} 天后再来` };
+      const ratingSpecs = [keys.rateAgain, keys.rateHard, keys.rateGood];
+      const ratingKeys = [];
       RATING_CHOICES.forEach(([rating, label], position) => {
         const choice = button("", () => rate(rating), "bcm-rating");
         choice.dataset.rating = rating;
         choice.setAttribute("aria-label", `${label}，${hints[rating]}`);
         const name = node("span", "bcm-rating-label");
-        name.append(node("kbd", "", String(position + 1)), node("span", "", label));
+        const kbd = node("kbd", "", ratingSpecs[position] ? formatShortcut(ratingSpecs[position]) : "");
+        kbd.hidden = !ratingSpecs[position];
+        ratingKeys.push(kbd);
+        name.append(kbd, node("span", "", label));
         choice.append(name, node("small", "", hints[rating]));
         ratings.append(choice);
       });
       sessionCard.replaceChildren(title2, hint, playback, revealButton2, answer, ratings);
-      revealTarget = { title: title2, revealButton: revealButton2, answer, ratings };
+      revealTarget = { title: title2, revealButton: revealButton2, answer, ratings, shortcutHint, ratingKeys };
       title2.focus({ preventScroll: true });
     }
     function reveal() {
@@ -2380,15 +2664,22 @@
       return Boolean(target?.closest?.(".bcm-panel"));
     }
     function onSessionKey(event) {
-      if (!sessionActive() || event.isComposing || event.repeat || event.ctrlKey || event.metaKey || event.altKey || isEditableEvent(event)) return;
+      if (!sessionActive() || event.isComposing || event.repeat || isEditableEvent(event)) return;
       const deepActive = getDeepActiveElement();
       if (insideOverlayPanel(event.target) || insideOverlayPanel(deepActive)) return;
-      const rating = RATING_CHOICES[Number(event.key) - 1];
-      if (revealed && rating) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        void rate(rating[0]);
-      } else if (event.key === " " && !revealed && !isInteractiveControl(event.target) && !isInteractiveControl(deepActive)) {
+      const keys = currentShortcuts();
+      if (revealed) {
+        const ratingSpecs = [keys.rateAgain, keys.rateHard, keys.rateGood];
+        const index = ratingSpecs.findIndex((spec) => matchesShortcut(event, spec));
+        if (index >= 0) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          void rate(RATING_CHOICES[index][0]);
+        }
+        return;
+      }
+      if (matchesShortcut(event, keys.reveal)) {
+        if ((keys.reveal === "Space" || keys.reveal === "Enter") && (isInteractiveControl(event.target) || isInteractiveControl(deepActive))) return;
         event.preventDefault();
         event.stopImmediatePropagation();
         reveal();
@@ -2593,7 +2884,7 @@
       controls.clear();
       element.remove();
     }
-    return { element, open, close, toggle: () => opened ? close() : open(), refresh, refreshDue, resumeSession, dispose, isOpen: () => opened, flushDrafts };
+    return { element, open, close, toggle: () => opened ? close() : open(), refresh, refreshDue, refreshShortcuts, resumeSession, dispose, isOpen: () => opened, flushDrafts };
   }
 
   // src/review.js
@@ -2980,7 +3271,7 @@
   }
 
   // src/app.css
-  var app_default = '.bcm-root {\n  --bcm-text: #f2f6fb; --bcm-muted: #b8c9dd; --bcm-surface: #141c26;\n  --bcm-panel: #1c2733; --bcm-line: #405063; --bcm-accent: #75d2fa;\n  position: fixed; inset: 0; z-index: 2147483000; pointer-events: none;\n  color: var(--bcm-text); font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif;\n  text-align: start; color-scheme: dark;\n}\n.bcm-root [hidden], .bcm-dock[hidden], .bcm-mask[hidden] { display: none !important; }\n.bcm-root *, .bcm-dock *, .bcm-mask * { box-sizing: border-box; }\n.bcm-root :focus-visible, .bcm-dock :focus-visible, .bcm-mask :focus-visible { outline: 2px solid #75d2fa; outline-offset: 3px; }\n.bcm-root button, .bcm-root input, .bcm-root select, .bcm-dock button, .bcm-mask button { font: inherit; }\n.bcm-root ::selection { background: #75d2fa; color: #092333; }\n.bcm-root button:disabled, .bcm-dock button:disabled { opacity: .6; cursor: wait; }\n.bcm-root .bcm-notebook { z-index: 10; }\n.bcm-root .bcm-loopbar { z-index: 20; }\n.bcm-root .bcm-panel { z-index: 30; }\n.bcm-root .bcm-notification { z-index: 40; pointer-events: none; }\n.bcm-mask {\n  position: absolute !important; z-index: 25 !important; box-sizing: border-box !important;\n  user-select: none; touch-action: none; cursor: pointer; pointer-events: auto;\n  background: transparent; backdrop-filter: blur(var(--bcm-blur,14px));\n  -webkit-backdrop-filter: blur(var(--bcm-blur,14px));\n  mask-image: linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 16%,#000 84%,transparent);\n  mask-composite: intersect;\n  -webkit-mask-image: linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 16%,#000 84%,transparent);\n  -webkit-mask-composite: source-in;\n}\n.bcm-mask.bcm-solid { background: #151b22; backdrop-filter: none; -webkit-backdrop-filter: none; }\n.bcm-mask:not(.bcm-edit):not(.bcm-wheeling):hover, .bcm-mask.bcm-peek:not(.bcm-edit):not(.bcm-wheeling) {\n  background: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; mask-image: none; -webkit-mask-image: none;\n}\n.bcm-mask.bcm-edit, .bcm-mask.bcm-wheeling {\n  mask-image: none; -webkit-mask-image: none; outline: 2px dashed #75d2fa;\n  background: rgb(16 49 66 / 45%); backdrop-filter: blur(3px); cursor: move;\n}\n.bcm-mask .bcm-mask-tools {\n  position: absolute; bottom: calc(100% + 8px); right: 0; display: none;\n  align-items: center; flex-wrap: wrap; gap: 6px; min-width: 180px;\n  padding: 5px 8px; border-radius: 7px; background: #141c26; color: #f2f6fb;\n  font: 12px/1.5 system-ui, sans-serif;\n}\n.bcm-mask.bcm-edit .bcm-mask-tools { display: flex; }\n.bcm-mask-tools button, .bcm-dock button {\n  appearance: none; color: #eaf5ff; background: transparent; border: 0;\n  padding: 6px 8px; min-height: 30px; border-radius: 5px; cursor: pointer;\n}\n.bcm-dock button:hover, .bcm-mask-tools button:hover { background: #34495c; }\n.bcm-handle { display: none; position: absolute; width: 12px; height: 12px; background: #75d2fa; border: 1px solid #0e2836; border-radius: 2px; }\n.bcm-edit .bcm-handle { display: block; }\n.bcm-handle[data-handle="n"] { top:-6px; left:calc(50% - 6px); cursor:ns-resize; }\n.bcm-handle[data-handle="s"] { bottom:-6px; left:calc(50% - 6px); cursor:ns-resize; }\n.bcm-handle[data-handle="e"] { right:-6px; top:calc(50% - 6px); cursor:ew-resize; }\n.bcm-handle[data-handle="w"] { left:-6px; top:calc(50% - 6px); cursor:ew-resize; }\n.bcm-handle[data-handle="nw"] { top:-6px; left:-6px; cursor:nwse-resize; }\n.bcm-handle[data-handle="ne"] { top:-6px; right:-6px; cursor:nesw-resize; }\n.bcm-handle[data-handle="sw"] { bottom:-6px; left:-6px; cursor:nesw-resize; }\n.bcm-handle[data-handle="se"] { bottom:-6px; right:-6px; cursor:nwse-resize; }\n.bcm-dock {\n  position: absolute; top: 12px; right: 12px; z-index: 26;\n  display: flex; flex-wrap: wrap; align-items: center; gap: 2px; max-width: calc(100% - 24px);\n  padding: 4px 6px; border-radius: 9px; background: rgb(20 28 38 / 92%);\n  color: #f2f6fb; font: 12px/1.4 system-ui, "Microsoft YaHei", sans-serif;\n  transition: opacity .2s ease; pointer-events: auto;\n}\n.bcm-dock.bcm-idle:not(:hover):not(:focus-within) { opacity: 0; pointer-events: none; }\n.bcm-dock .bcm-version-button { color: #75d2fa; font-variant-numeric: tabular-nums; }\n.bcm-notification {\n  position: absolute; top: 18px; left: 50%; transform: translateX(-50%);\n  max-width: min(620px,calc(100% - 32px)); padding: 12px 18px; border-radius: 9px;\n  background: #1c2733; color: #f2f6fb; box-shadow: 0 8px 24px rgb(0 0 0 / 28%);\n  overflow-wrap: anywhere; pointer-events: auto;\n}\n.bcm-notification[data-kind="error"] { color: #ffc0bc; }\n.bcm-panel {\n  position: absolute; top: 14px; right: 14px; width: min(390px,calc(100% - 28px));\n  max-height: calc(100% - 28px); overflow: auto; padding: 20px; border-radius: 12px;\n  background: #141c26; color: #f2f6fb; box-shadow: 0 12px 32px rgb(0 0 0 / 32%);\n  pointer-events: auto; scrollbar-color: #536b80 #141c26;\n}\n.bcm-panel h2 { margin: 0 0 14px; font-size: 20px; font-weight: 650; }\n.bcm-panel p { margin: 10px 0; color: #b8c9dd; }\n.bcm-panel label { display: grid; grid-template-columns: 1fr 112px; gap: 12px; align-items: center; margin: 12px 0; }\n.bcm-panel input:not([type="checkbox"]), .bcm-panel select {\n  min-width: 0; width: 100%; min-height: 34px; padding: 6px 8px;\n  border: 1px solid #53677b; border-radius: 5px; background: #111923; color: #f2f6fb;\n}\n.bcm-panel input[type="checkbox"] { justify-self: end; width: 18px; height: 18px; accent-color: #75d2fa; }\n.bcm-panel button, .bcm-loopbar button {\n  border: 1px solid #53677b; background: #253647; color: #f2f6fb; border-radius: 6px;\n  min-height: 34px; padding: 7px 12px; cursor: pointer;\n}\n.bcm-panel button:hover, .bcm-loopbar button:hover { background: #38536b; }\n.bcm-panel .bcm-primary { background: #75d2fa; border-color: #75d2fa; color: #092333; }\n.bcm-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }\n.bcm-panel dl { margin: 14px 0; }\n.bcm-panel dt { margin-top: 12px; font-weight: 650; }\n.bcm-panel dd { margin: 4px 0 0; color: #b8c9dd; }\n.bcm-loopbar {\n  position: absolute; bottom: 74px; left: 50%; transform: translateX(-50%);\n  display: flex; align-items: center; flex-wrap: wrap; gap: 12px;\n  max-width: calc(100% - 24px); padding: 10px 14px; border-radius: 9px;\n  background: #141c26; color: #f2f6fb; pointer-events: auto;\n  font-variant-numeric: tabular-nums;\n}\n@media (max-width: 540px) {\n  .bcm-dock { top: 6px; right: 6px; max-width: calc(100% - 12px); }\n  .bcm-dock button { padding: 5px 6px; }\n  .bcm-notification { top: 6px; }\n}\n@media (prefers-reduced-motion: reduce) { .bcm-dock { transition: none; } }\n';
+  var app_default = '.bcm-root {\n  --bcm-text: #f2f6fb; --bcm-muted: #b8c9dd; --bcm-surface: #141c26;\n  --bcm-panel: #1c2733; --bcm-line: #405063; --bcm-accent: #75d2fa;\n  position: fixed; inset: 0; z-index: 2147483000; pointer-events: none;\n  color: var(--bcm-text); font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif;\n  text-align: start; color-scheme: dark;\n}\n.bcm-root [hidden], .bcm-dock[hidden], .bcm-mask[hidden] { display: none !important; }\n.bcm-root *, .bcm-dock *, .bcm-mask * { box-sizing: border-box; }\n.bcm-root :focus-visible, .bcm-dock :focus-visible, .bcm-mask :focus-visible { outline: 2px solid #75d2fa; outline-offset: 3px; }\n.bcm-root button, .bcm-root input, .bcm-root select, .bcm-dock button, .bcm-mask button { font: inherit; }\n.bcm-root ::selection { background: #75d2fa; color: #092333; }\n.bcm-root button:disabled, .bcm-dock button:disabled { opacity: .6; cursor: wait; }\n.bcm-root .bcm-notebook { z-index: 10; }\n.bcm-root .bcm-loopbar { z-index: 20; }\n.bcm-root .bcm-panel { z-index: 30; }\n.bcm-root .bcm-notification { z-index: 40; pointer-events: none; }\n.bcm-mask {\n  position: absolute !important; z-index: 25 !important; box-sizing: border-box !important;\n  user-select: none; touch-action: none; cursor: pointer; pointer-events: auto;\n  background: transparent; backdrop-filter: blur(var(--bcm-blur,14px));\n  -webkit-backdrop-filter: blur(var(--bcm-blur,14px));\n  mask-image: linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 16%,#000 84%,transparent);\n  mask-composite: intersect;\n  -webkit-mask-image: linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 16%,#000 84%,transparent);\n  -webkit-mask-composite: source-in;\n}\n.bcm-mask.bcm-solid { background: #151b22; backdrop-filter: none; -webkit-backdrop-filter: none; }\n.bcm-mask:not(.bcm-edit):not(.bcm-wheeling):hover, .bcm-mask.bcm-peek:not(.bcm-edit):not(.bcm-wheeling) {\n  background: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; mask-image: none; -webkit-mask-image: none;\n}\n.bcm-mask.bcm-edit, .bcm-mask.bcm-wheeling {\n  mask-image: none; -webkit-mask-image: none; outline: 2px dashed #75d2fa;\n  background: rgb(16 49 66 / 45%); backdrop-filter: blur(3px); cursor: move;\n}\n.bcm-mask .bcm-mask-tools {\n  position: absolute; bottom: calc(100% + 8px); right: 0; display: none;\n  align-items: center; flex-wrap: wrap; gap: 6px; min-width: 180px;\n  padding: 5px 8px; border-radius: 7px; background: #141c26; color: #f2f6fb;\n  font: 12px/1.5 system-ui, sans-serif;\n}\n.bcm-mask.bcm-edit .bcm-mask-tools { display: flex; }\n.bcm-mask-tools button, .bcm-dock button {\n  appearance: none; color: #eaf5ff; background: transparent; border: 0;\n  padding: 6px 8px; min-height: 30px; border-radius: 5px; cursor: pointer;\n}\n.bcm-dock button:hover, .bcm-mask-tools button:hover { background: #34495c; }\n.bcm-handle { display: none; position: absolute; width: 12px; height: 12px; background: #75d2fa; border: 1px solid #0e2836; border-radius: 2px; }\n.bcm-edit .bcm-handle { display: block; }\n.bcm-handle[data-handle="n"] { top:-6px; left:calc(50% - 6px); cursor:ns-resize; }\n.bcm-handle[data-handle="s"] { bottom:-6px; left:calc(50% - 6px); cursor:ns-resize; }\n.bcm-handle[data-handle="e"] { right:-6px; top:calc(50% - 6px); cursor:ew-resize; }\n.bcm-handle[data-handle="w"] { left:-6px; top:calc(50% - 6px); cursor:ew-resize; }\n.bcm-handle[data-handle="nw"] { top:-6px; left:-6px; cursor:nwse-resize; }\n.bcm-handle[data-handle="ne"] { top:-6px; right:-6px; cursor:nesw-resize; }\n.bcm-handle[data-handle="sw"] { bottom:-6px; left:-6px; cursor:nesw-resize; }\n.bcm-handle[data-handle="se"] { bottom:-6px; right:-6px; cursor:nwse-resize; }\n.bcm-dock {\n  position: absolute; top: 12px; right: 12px; z-index: 26;\n  display: flex; flex-wrap: wrap; align-items: center; gap: 2px; max-width: calc(100% - 24px);\n  padding: 4px 6px; border-radius: 9px; background: rgb(20 28 38 / 92%);\n  color: #f2f6fb; font: 12px/1.4 system-ui, "Microsoft YaHei", sans-serif;\n  transition: opacity .2s ease; pointer-events: auto;\n}\n.bcm-dock.bcm-idle:not(:hover):not(:focus-within) { opacity: 0; pointer-events: none; }\n.bcm-dock .bcm-version-button { color: #75d2fa; font-variant-numeric: tabular-nums; }\n.bcm-notification {\n  position: absolute; top: 18px; left: 50%; transform: translateX(-50%);\n  max-width: min(620px,calc(100% - 32px)); padding: 12px 18px; border-radius: 9px;\n  background: #1c2733; color: #f2f6fb; box-shadow: 0 8px 24px rgb(0 0 0 / 28%);\n  overflow-wrap: anywhere; pointer-events: auto;\n}\n.bcm-notification[data-kind="error"] { color: #ffc0bc; }\n.bcm-panel {\n  position: absolute; top: 14px; right: 14px; width: min(390px,calc(100% - 28px));\n  max-height: calc(100% - 28px); overflow: auto; padding: 20px; border-radius: 12px;\n  background: #141c26; color: #f2f6fb; box-shadow: 0 12px 32px rgb(0 0 0 / 32%);\n  pointer-events: auto; scrollbar-color: #536b80 #141c26;\n}\n.bcm-panel h2 { margin: 0 0 14px; font-size: 20px; font-weight: 650; }\n.bcm-panel p { margin: 10px 0; color: #b8c9dd; }\n.bcm-panel label { display: grid; grid-template-columns: 1fr 112px; gap: 12px; align-items: center; margin: 12px 0; }\n.bcm-panel input:not([type="checkbox"]), .bcm-panel select {\n  min-width: 0; width: 100%; min-height: 34px; padding: 6px 8px;\n  border: 1px solid #53677b; border-radius: 5px; background: #111923; color: #f2f6fb;\n}\n.bcm-panel input[type="checkbox"] { justify-self: end; width: 18px; height: 18px; accent-color: #75d2fa; }\n.bcm-panel button, .bcm-loopbar button {\n  border: 1px solid #53677b; background: #253647; color: #f2f6fb; border-radius: 6px;\n  min-height: 34px; padding: 7px 12px; cursor: pointer;\n}\n.bcm-panel button:hover, .bcm-loopbar button:hover { background: #38536b; }\n.bcm-panel .bcm-primary { background: #75d2fa; border-color: #75d2fa; color: #092333; }\n.bcm-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }\n.bcm-shortcut-section {\n  margin: 18px 0 0; padding: 14px 0 0; border: 0; border-top: 1px solid var(--bcm-line);\n}\n.bcm-shortcut-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }\n.bcm-shortcut-section legend { padding: 0; font-size: 15px; font-weight: 650; color: var(--bcm-text); }\n.bcm-panel .bcm-shortcut-reset { min-height: 28px; padding: 4px 10px; font-size: 12px; }\n.bcm-panel .bcm-shortcut-hint { margin: 0 0 12px; font-size: 12px; color: var(--bcm-muted); }\n.bcm-shortcut-row {\n  display: grid; grid-template-columns: minmax(0, 1fr) minmax(136px, 168px); gap: 8px; align-items: center; margin: 8px 0;\n}\n.bcm-panel label.bcm-shortcut-label { display: block; margin: 0; font-size: 13px; color: var(--bcm-text); }\n.bcm-shortcut-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }\n.bcm-panel input.bcm-shortcut-input {\n  text-align: center; cursor: pointer; font-family: ui-monospace, Consolas, system-ui, monospace; font-size: 12px;\n}\n.bcm-panel input.bcm-shortcut-input[data-recording="true"] {\n  border-color: var(--bcm-accent); color: var(--bcm-accent); background: #102536;\n}\n.bcm-panel .bcm-shortcut-clear { min-height: 34px; padding: 4px 8px; font-size: 12px; }\n.bcm-panel dl { margin: 14px 0; }\n.bcm-panel dt { margin-top: 12px; font-weight: 650; }\n.bcm-panel dd { margin: 4px 0 0; color: #b8c9dd; }\n.bcm-loopbar {\n  position: absolute; bottom: 74px; left: 50%; transform: translateX(-50%);\n  display: flex; align-items: center; flex-wrap: wrap; gap: 12px;\n  max-width: calc(100% - 24px); padding: 10px 14px; border-radius: 9px;\n  background: #141c26; color: #f2f6fb; pointer-events: auto;\n  font-variant-numeric: tabular-nums;\n}\n@media (max-width: 540px) {\n  .bcm-dock { top: 6px; right: 6px; max-width: calc(100% - 12px); }\n  .bcm-dock button { padding: 5px 6px; }\n  .bcm-notification { top: 6px; }\n}\n@media (prefers-reduced-motion: reduce) { .bcm-dock { transition: none; } }\n';
 
   // src/notebook.css
   var notebook_default = '.bcm-notebook {\n    --bcm-surface: #141c26;\n    --bcm-panel: #1c2733;\n    --bcm-field: #111923;\n    --bcm-line: #405063;\n    --bcm-text: #f2f6fb;\n    --bcm-muted: #b8c9dd;\n    --bcm-accent: #75d2fa;\n    --bcm-accent-ink: #092333;\n    --bcm-error: #ffc0bc;\n    position: absolute;\n    inset-block: 0;\n    inset-inline-end: 0;\n    display: flex;\n    flex-direction: column;\n    box-sizing: border-box;\n    width: 420px;\n    max-width: 100vw;\n    max-width: min(100vw, 100%);\n    height: 100%;\n    min-height: 0;\n    overflow: hidden;\n    color: var(--bcm-text);\n    background: var(--bcm-surface);\n    box-shadow: -12px 0 32px rgb(0 0 0 / 30%);\n    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;\n    text-align: start;\n    color-scheme: dark;\n    isolation: isolate;\n    pointer-events: auto;\n}\n\n.bcm-notebook [hidden], .bcm-notebook[hidden] { display: none !important; }\n.bcm-notebook *, .bcm-notebook *::before, .bcm-notebook *::after { box-sizing: border-box; }\n.bcm-notebook h2, .bcm-notebook h3, .bcm-notebook p { margin: 0; padding: 0; }\n.bcm-notebook button, .bcm-notebook input, .bcm-notebook select, .bcm-notebook textarea { font: inherit; letter-spacing: normal; }\n.bcm-notebook ::selection { color: var(--bcm-accent-ink); background: var(--bcm-accent); }\n.bcm-notebook :focus-visible { outline: 2px solid var(--bcm-accent); outline-offset: 3px; }\n.bcm-notebook button:disabled { opacity: .55; cursor: not-allowed; }\n.bcm-notebook button { touch-action: manipulation; }\n.bcm-notebook-header { flex: none; padding: 18px 18px 14px; border-block-end: 1px solid var(--bcm-line); background: var(--bcm-surface); }\n.bcm-heading-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-notebook .bcm-notebook-title { margin-inline-end: auto; font-size: 20px; line-height: 1.3; font-weight: 650; }\n.bcm-version { color: var(--bcm-accent); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notebook .bcm-subtitle { margin-block: 8px 12px; color: var(--bcm-muted); font-size: 14px; }\n.bcm-toolbar { display: flex; flex-wrap: wrap; gap: 8px; }\n.bcm-notebook .bcm-button {\n    appearance: none;\n    display: inline-flex;\n    justify-content: center;\n    align-items: center;\n    gap: 6px;\n    min-height: 36px;\n    max-width: 100%;\n    padding: 7px 11px;\n    border: 1px solid var(--bcm-line);\n    border-radius: 7px;\n    color: var(--bcm-text);\n    background: var(--bcm-panel);\n    font-size: 13px;\n    line-height: 1.3;\n    text-align: center;\n    text-decoration: none;\n    overflow-wrap: anywhere;\n    cursor: pointer;\n}\n.bcm-notebook .bcm-button:hover:not(:disabled) { background: #2b3c4e; border-color: #7891aa; }\n.bcm-notebook .bcm-button-primary { color: var(--bcm-accent-ink); background: var(--bcm-accent); border-color: transparent; font-weight: 650; }\n.bcm-notebook .bcm-button-primary:hover:not(:disabled) { background: #a0e3ff; border-color: transparent; }\n.bcm-notebook .bcm-button-quiet { background: transparent; border-color: transparent; color: var(--bcm-muted); }\n.bcm-notebook .bcm-delete:hover:not(:disabled) { color: var(--bcm-error); background: #452d32; border-color: transparent; }\n.bcm-notebook-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: #657c92 var(--bcm-surface); scrollbar-width: thin; }\n.bcm-notebook-scroll::-webkit-scrollbar { width: 8px; }\n.bcm-notebook-scroll::-webkit-scrollbar-track { background: var(--bcm-surface); }\n.bcm-notebook-scroll::-webkit-scrollbar-thumb { background: #657c92; border-radius: 8px; border: 2px solid var(--bcm-surface); }\n.bcm-filters { padding: 18px; display: grid; gap: 12px; }\n.bcm-field { display: grid; gap: 6px; min-width: 0; }\n.bcm-label { color: var(--bcm-muted); font-size: 12px; line-height: 1.4; }\n.bcm-filter-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }\n.bcm-notebook .bcm-input, .bcm-notebook .bcm-select {\n    appearance: auto;\n    display: block;\n    width: 100%;\n    min-width: 0;\n    max-width: 100%;\n    min-height: 38px;\n    padding: 8px 10px;\n    border: 1px solid var(--bcm-line);\n    border-radius: 7px;\n    color: var(--bcm-text);\n    background: var(--bcm-field);\n    caret-color: var(--bcm-accent);\n    font-size: 14px;\n    line-height: 1.5;\n}\n.bcm-notebook .bcm-input::placeholder { color: #a3b7ce; opacity: 1; }\n.bcm-notebook textarea.bcm-input { min-height: 86px; resize: vertical; overflow-wrap: anywhere; }\n.bcm-summary-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-result-summary { flex: 1; color: var(--bcm-muted); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notices, .bcm-undo { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 18px 16px; padding: 12px; background: #233747; border-radius: 8px; overflow-wrap: anywhere; }\n.bcm-notices > span, .bcm-undo > span { flex: 1 1 180px; }\n.bcm-notice-error { color: var(--bcm-error); background: #3b272d; }\n.bcm-import-preview { margin: 0 18px 18px; padding: 14px; background: var(--bcm-panel); border-radius: 8px; overflow-wrap: anywhere; }\n.bcm-notebook .bcm-import-preview h3 { font-size: 16px; margin-block-end: 8px; }\n.bcm-notebook .bcm-import-preview p { margin-block-end: 12px; }\n.bcm-note-list { padding-inline: 18px; }\n.bcm-note { display: grid; gap: 12px; padding-block: 20px 22px; border-block-start: 1px solid var(--bcm-line); min-width: 0; }\n.bcm-note-header { display: flex; align-items: start; gap: 10px; min-width: 0; }\n.bcm-notebook .bcm-note-title { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 15px; line-height: 1.5; font-weight: 600; }\n.bcm-note-header .bcm-button { flex-shrink: 0; }\n.bcm-note-meta { color: var(--bcm-muted); font-size: 12px; overflow-wrap: anywhere; }\n.bcm-image-placeholder { display: grid; align-items: center; min-height: 80px; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 8px; color: var(--bcm-muted); background: #0c121a; font-size: 13px; text-align: center; }\n.bcm-note-image { display: block; width: 100%; height: 100%; object-fit: contain; }\n.bcm-playback-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-play-button { font-variant-numeric: tabular-nums; }\n.bcm-note-bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, 1fr); align-items: end; gap: 12px; }\n.bcm-save-state { padding-block-end: 10px; color: var(--bcm-muted); font-size: 12px; text-align: end; overflow-wrap: anywhere; }\n.bcm-save-error { color: var(--bcm-error); }\n.bcm-empty { padding: 28px 8px 36px; color: var(--bcm-muted); overflow-wrap: anywhere; }\n.bcm-notebook .bcm-empty h3 { color: var(--bcm-text); font-size: 16px; margin-block-end: 10px; }\n.bcm-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 14px 18px; border-block-start: 1px solid var(--bcm-line); }\n.bcm-page-label { color: var(--bcm-muted); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notebook .bcm-storage-note { padding: 16px 18px 22px; color: var(--bcm-muted); font-size: 12px; overflow-wrap: anywhere; }\n.bcm-due-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 16px 18px 0; padding: 12px 14px; border-radius: 8px; background: var(--bcm-panel); }\n.bcm-due-text { flex: 1 1 160px; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }\n.bcm-session { display: grid; gap: 14px; padding: 18px; }\n.bcm-session-top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }\n.bcm-session-progress { color: var(--bcm-muted); font-size: 13px; font-variant-numeric: tabular-nums; }\n.bcm-session-card { display: grid; gap: 14px; min-width: 0; padding: 16px; border-radius: 10px; background: var(--bcm-panel); }\n.bcm-notebook .bcm-session-title { font-size: 17px; line-height: 1.4; font-weight: 650; overflow-wrap: anywhere; }\n.bcm-session-hint { color: var(--bcm-muted); font-size: 13px; overflow-wrap: anywhere; }\n.bcm-session-answer { display: grid; gap: 10px; padding-block-start: 14px; border-block-start: 1px solid var(--bcm-line); }\n.bcm-session-note { white-space: pre-wrap; overflow-wrap: anywhere; }\n.bcm-session-tags { color: var(--bcm-muted); font-size: 12px; overflow-wrap: anywhere; }\n.bcm-ratings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }\n.bcm-notebook .bcm-rating { flex-direction: column; gap: 3px; padding: 9px 6px; }\n.bcm-rating-label { display: inline-flex; align-items: center; gap: 7px; font-weight: 650; }\n.bcm-rating kbd { padding: 1px 5px; border: 1px solid var(--bcm-line); border-radius: 4px; color: var(--bcm-muted); font: 600 11px/1.4 ui-monospace, Consolas, system-ui, monospace; }\n.bcm-rating small { color: var(--bcm-muted); font-size: 12px; }\n.bcm-nowrap { white-space: nowrap; }\n.bcm-notebook .bcm-rating[data-rating="again"] { border-color: #b86b75; }\n.bcm-notebook .bcm-rating[data-rating="good"] { border-color: #55b892; }\n@media (max-width: 440px) {\n    .bcm-notebook { width: 100%; }\n    .bcm-notebook-header { padding: 12px; }\n    .bcm-filters { padding: 14px 12px; }\n    .bcm-note-list { padding-inline: 12px; }\n    .bcm-notices, .bcm-undo, .bcm-import-preview, .bcm-due-bar { margin-inline: 12px; }\n    .bcm-session { padding: 14px 12px; }\n    .bcm-notebook .bcm-input, .bcm-notebook .bcm-select { font-size: 16px; }\n    .bcm-toolbar { gap: 6px; }\n}\n@media (max-height: 420px) {\n    .bcm-notebook-header { padding-block: 10px; }\n    .bcm-notebook .bcm-subtitle { display: none; }\n    .bcm-notebook-header .bcm-toolbar { margin-block-start: 8px; }\n}\n@media (prefers-reduced-motion: reduce) {\n    .bcm-notebook *, .bcm-notebook *::before, .bcm-notebook *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }\n}\n@media (forced-colors: active) {\n    .bcm-notebook { border: 1px solid CanvasText; }\n    .bcm-notebook :focus-visible { outline-color: Highlight; }\n    .bcm-notebook .bcm-button { border: 1px solid ButtonText; }\n}\n';
@@ -3066,18 +3357,26 @@
       wakeDock();
     }
     function showHelp() {
+      const currentCfg = settings.get(snapshot?.identity.seriesId || "global_default");
+      const sc = currentCfg.shortcuts || DEFAULT_SHORTCUTS;
+      const captureKey = sc.capture === DEFAULT_SHORTCUTS.capture && currentCfg.singleKeys ? `${formatShortcut(sc.capture)} / S` : formatShortcut(sc.capture);
+      const notebookKey = sc.notebook === DEFAULT_SHORTCUTS.notebook && currentCfg.singleKeys ? `${formatShortcut(sc.notebook)} / B` : formatShortcut(sc.notebook);
+      const toggleKey = sc.toggleMask === DEFAULT_SHORTCUTS.toggleMask ? `${formatShortcut(sc.toggleMask)} / Shift + C` : formatShortcut(sc.toggleMask);
+      const editKey = sc.editMask === DEFAULT_SHORTCUTS.editMask ? `${formatShortcut(sc.editMask)} / Shift + Z` : formatShortcut(sc.editMask);
+      const peekKey = sc.peek ? `悬停遮罩 / 按住 ${formatShortcut(sc.peek)}` : "悬停遮罩";
+      const rateKeys = [sc.rateAgain, sc.rateHard, sc.rateGood].map(formatShortcut).join(" / ");
       showPanel(`看剧学英语 v${VERSION}`);
-      panel.append(el("p", "", "先遮中文听一遍；遇到难句收藏，再回到原片段复听。"));
+      panel.append(el("p", "", "先遮中文听一遍；遇到难句收藏，再回到原片段复听。所有快捷键均可在「设置」中自定义或禁用。"));
       const list = el("dl");
       for (const [key, desc] of [
-        ["Alt + S / S", "收藏当前画面与来源时间；关闭单字母快捷键后，仅 Alt 组合有效。"],
-        ["Alt + B / B", "打开场景复习本，搜索、标记掌握或导出备份。"],
+        [captureKey, "收藏当前画面与来源时间；关闭单字母快捷键或自定义键位后，按设置的快捷键生效。"],
+        [notebookKey, "打开场景复习本，搜索、标记掌握或导出备份。"],
         ["Alt + 滚轮", "只在播放器内微调遮罩高度。"],
-        ["悬停遮罩 / 按住 Alt", "临时看清中文，移开或松键恢复。"],
-        ["Alt + Z / Shift + Z", "进入或退出拖动、拉伸模式。"],
-        ["Alt + C / Shift + C", "开关中文字幕遮罩。"],
+        [peekKey, "临时看清中文，移开或松键恢复。"],
+        [editKey, "进入或退出拖动、拉伸模式。"],
+        [toggleKey, "开关中文字幕遮罩。"],
         ["循环复听", "以收藏点前后几秒为区间，完成后返回开始复习前的进度。"],
-        ["到期复习", "复习本顶部点“开始复习”：先听、回想，空格显示答案，再按 1 / 2 / 3 自评，下次复习按间隔排期。"]
+        ["到期复习", `复习本顶部点“开始复习”：先听、回想，${formatShortcut(sc.reveal)}显示答案，再按 ${rateKeys} 自评，下次复习按间隔排期。`]
       ]) list.append(el("dt", "", key), el("dd", "", desc));
       panel.append(list, el("p", "", "收藏只保存在当前浏览器的本机数据中。建议定期在复习本导出 JSON 备份；HTML 用于离线阅读。"));
       const done = button2("开始看剧", closePanel, "bcm-primary");
@@ -3088,7 +3387,7 @@
       if (!snapshot) return;
       config = settings.get(snapshot.identity.seriesId);
       showPanel("遮罩与复习设置");
-      panel.append(el("p", "", `v${VERSION} · 位置按剧集记忆，其他偏好全局生效。`));
+      panel.append(el("p", "", `v${VERSION} · 位置按剧集记忆，其他偏好与快捷键全局生效。`));
       const form = el("form");
       const inputs = /* @__PURE__ */ new Map();
       const add = (key, label, type, min, max, step) => {
@@ -3128,6 +3427,80 @@
       add("loopGap", "循环间隔（秒）", "number", 0, 10, 0.5);
       add("playbackRate", "复听倍速", "number", 0.5, 2, 0.25);
       add("reviewBatch", "每组复习条数", "number", 5, 100);
+      const shortcutDrafts = { ...DEFAULT_SHORTCUTS, ...config.shortcuts || {} };
+      const shortcutInputs = /* @__PURE__ */ new Map();
+      const shortcutSection = el("fieldset", "bcm-shortcut-section");
+      const shortcutHeader = el("div", "bcm-shortcut-header");
+      shortcutHeader.append(el("legend", "", "快捷键设置"), button2("恢复默认快捷键", () => {
+        Object.assign(shortcutDrafts, DEFAULT_SHORTCUTS);
+        for (const action of SHORTCUT_ACTIONS) {
+          const input = shortcutInputs.get(action.id);
+          if (input) input.value = formatShortcut(shortcutDrafts[action.id]);
+        }
+      }, "bcm-shortcut-reset"));
+      shortcutSection.append(shortcutHeader, el("p", "bcm-shortcut-hint", "点击按键框后直接按下新组合键；按 Esc 取消录入，点「禁用」可关闭冲突键位。"));
+      for (const action of SHORTCUT_ACTIONS) {
+        const row = el("div", "bcm-shortcut-row");
+        const id = `bcm-shortcut-${action.id}`;
+        const label = el("label", "bcm-shortcut-label", action.label);
+        label.htmlFor = id;
+        const control = el("div", "bcm-shortcut-control");
+        const input = el("input", "bcm-shortcut-input");
+        input.id = id;
+        input.type = "text";
+        input.readOnly = true;
+        input.dataset.shortcutAction = action.id;
+        input.setAttribute("aria-label", `${action.label}快捷键`);
+        input.value = formatShortcut(shortcutDrafts[action.id]);
+        let recordedModifierOnly = false;
+        input.addEventListener("focus", () => {
+          recordedModifierOnly = false;
+          input.dataset.recording = "true";
+          input.value = "请按下快捷键…";
+        });
+        input.addEventListener("blur", () => {
+          delete input.dataset.recording;
+          input.value = formatShortcut(shortcutDrafts[action.id]);
+        });
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Tab" && !event.ctrlKey && !event.altKey && !event.metaKey) return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.key === "Escape") {
+            input.blur();
+            return;
+          }
+          if (event.isComposing || event.repeat) return;
+          const spec = eventToShortcut(event, { allowModifierOnly: action.allowModifierOnly });
+          if (!spec) return;
+          shortcutDrafts[action.id] = spec;
+          input.value = formatShortcut(spec);
+          if (action.allowModifierOnly && ["Alt", "Shift", "Ctrl"].includes(spec)) {
+            recordedModifierOnly = true;
+          } else {
+            recordedModifierOnly = false;
+            input.blur();
+          }
+        });
+        input.addEventListener("keyup", (event) => {
+          if (recordedModifierOnly && input.dataset.recording === "true") {
+            event.preventDefault();
+            event.stopPropagation();
+            recordedModifierOnly = false;
+            input.blur();
+          }
+        });
+        const clearBtn = button2("禁用", () => {
+          shortcutDrafts[action.id] = "";
+          input.value = formatShortcut("");
+        }, "bcm-shortcut-clear");
+        clearBtn.setAttribute("aria-label", `禁用${action.label}快捷键`);
+        control.append(input, clearBtn);
+        row.append(label, control);
+        shortcutSection.append(row);
+        shortcutInputs.set(action.id, input);
+      }
+      form.append(shortcutSection);
       const actions = el("div", "bcm-panel-actions");
       const submit = el("button", "bcm-primary", "保存设置");
       submit.type = "submit";
@@ -3149,9 +3522,16 @@
           notify("循环区间需要大于 0 秒", { kind: "error" });
           return;
         }
+        const conflict = findShortcutConflict(shortcutDrafts);
+        if (conflict) {
+          notify(`快捷键冲突：「${conflict.first.label}」与「${conflict.second.label}」不能同为 ${formatShortcut(conflict.shortcut)}`, { kind: "error" });
+          return;
+        }
+        patch.shortcuts = { ...shortcutDrafts };
         try {
           config = settings.patch(snapshot.identity.seriesId, patch);
           paint();
+          notebook.refreshShortcuts();
           closePanel();
           notify("设置已保存");
         } catch (error) {
@@ -3179,6 +3559,7 @@
       sessionStorage: session,
       getLeadIn: () => settings.get(snapshot?.identity.seriesId || "global_default").leadIn,
       getBatchSize: () => settings.get(snapshot?.identity.seriesId || "global_default").reviewBatch,
+      getShortcuts: () => settings.get(snapshot?.identity.seriesId || "global_default").shortcuts,
       onHelp: showHelp,
       onSettings: showSettings,
       onLoop: async (note) => {
@@ -3492,6 +3873,7 @@
       }, 600);
     }, { capture: true, passive: false, signal: events.signal });
     window.addEventListener("keydown", (event) => {
+      if (event.target?.dataset?.shortcutAction) return;
       if (event.key === "Escape") {
         if (!panel.hidden) {
           event.stopPropagation();
@@ -3506,20 +3888,29 @@
         }
         return;
       }
-      if (!snapshot || isEditableEvent(event) || event.isComposing || event.ctrlKey || event.metaKey) return;
-      if (event.key === "Alt") {
-        peek = true;
-        paint();
+      if (!snapshot || !panel.hidden || isEditableEvent(event) || event.isComposing) return;
+      const shortcuts = config.shortcuts || DEFAULT_SHORTCUTS;
+      if (shortcuts.peek && matchesShortcut(event, shortcuts.peek, { allowModifierOnly: true })) {
+        if (!peek) {
+          peek = true;
+          paint();
+        }
+        if (!["Alt", "Shift", "Ctrl"].includes(shortcuts.peek)) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
         return;
       }
       if (event.repeat) return;
-      const key = (event.code?.replace(/^Key/, "") || event.key).toUpperCase();
-      const oneKey = config.singleKeys && !event.altKey && !event.shiftKey;
       let action;
-      if ((event.altKey || oneKey) && key === "S") action = capture;
-      if ((event.altKey || oneKey) && key === "B") action = () => notebook.toggle().catch(fail2);
-      if ((event.altKey || event.shiftKey) && key === "C") action = toggleMask;
-      if ((event.altKey || event.shiftKey) && key === "Z") action = toggleEdit;
+      if (matchesShortcut(event, shortcuts.capture)) action = capture;
+      else if (matchesShortcut(event, shortcuts.notebook)) action = () => notebook.toggle().catch(fail2);
+      else if (matchesShortcut(event, shortcuts.toggleMask)) action = toggleMask;
+      else if (matchesShortcut(event, shortcuts.editMask)) action = toggleEdit;
+      else if (config.singleKeys && shortcuts.capture === DEFAULT_SHORTCUTS.capture && matchesShortcut(event, "S")) action = capture;
+      else if (config.singleKeys && shortcuts.notebook === DEFAULT_SHORTCUTS.notebook && matchesShortcut(event, "B")) action = () => notebook.toggle().catch(fail2);
+      else if (shortcuts.toggleMask === DEFAULT_SHORTCUTS.toggleMask && matchesShortcut(event, "Shift+C")) action = toggleMask;
+      else if (shortcuts.editMask === DEFAULT_SHORTCUTS.editMask && matchesShortcut(event, "Shift+Z")) action = toggleEdit;
       if (action) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -3532,7 +3923,7 @@
       }
     }, { capture: true, signal: events.signal });
     window.addEventListener("keyup", (event) => {
-      if (event.key === "Alt") {
+      if (peek && matchesPeekRelease(event, config?.shortcuts?.peek ?? DEFAULT_SHORTCUTS.peek)) {
         peek = false;
         paint();
       }

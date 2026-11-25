@@ -449,6 +449,28 @@ test('session shortcuts ignore editable inputs and shadow DOM editors for Space 
     assert.deepEqual(fixture.ratings, ['note_1:good']);
 });
 
+test('custom session shortcuts reveal, rate, disable keys and update kbd labels live', async t => {
+    let shortcuts = { reveal: 'E', rateAgain: 'A', rateHard: '', rateGood: 'Alt+D' };
+    const fixture = sitting(t, [scene('note_1', 1)], { notebook: { getShortcuts: () => shortcuts } });
+    const view = sessionOf(fixture.notebook);
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    assert.match(byClass(view, 'bcm-nowrap').textContent, /E显示答案，A \/ — \/ Alt \+ D 自评/);
+    await fixture.window.emit('keydown', { key: ' ' });
+    assert.equal(byClass(view, 'bcm-session-answer').hidden, true, 'old Space key no longer reveals');
+    await fixture.window.emit('keydown', { key: 'e', code: 'KeyE' });
+    assert.equal(byClass(view, 'bcm-session-answer').hidden, false);
+    assert.equal(choice(view, 'hard').children[0].children[0].hidden, true, 'disabled rating hides kbd badge');
+    shortcuts = { reveal: 'E', rateAgain: 'A', rateHard: 'S', rateGood: 'D' };
+    fixture.notebook.refreshShortcuts();
+    assert.equal(choice(view, 'hard').children[0].children[0].hidden, false);
+    assert.equal(choice(view, 'hard').children[0].children[0].textContent, 'S');
+    await fixture.window.emit('keydown', { key: '3' });
+    assert.deepEqual(fixture.ratings, [], 'old digit key no longer rates');
+    await fixture.window.emit('keydown', { key: 'd', code: 'KeyD' });
+    assert.deepEqual(fixture.ratings, ['note_1:good']);
+});
+
 test('a rating that cannot be saved keeps the card on screen and can be retried', async t => {
     const fixture = sitting(t, [scene('note_1', 1)]);
     const view = sessionOf(fixture.notebook);

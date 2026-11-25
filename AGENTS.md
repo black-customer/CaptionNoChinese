@@ -14,6 +14,7 @@
   - `notebook.js` — 复习本抽屉、草稿串行保存、复习会话与跨视频续接
   - `review.js` — A–B 片段循环控制器
   - `schedule.js` — 固定阶梯到期复习排期（1 / 3 / 7 / 15 / 31 天，04:00 跨天分界）
+  - `shortcuts.js` — 自定义快捷键规范化、事件匹配、冲突检测与展示格式化
   - `editable.js` — 输入态与 Shadow DOM 焦点/事件路径判定（所有快捷键共用）
   - `app.css` / `notebook.css` — 样式文件（构建时内联）
 - `scripts/build.mjs` — esbuild 构建脚本，生成根目录单文件产物

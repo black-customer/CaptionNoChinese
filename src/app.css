@@ -92,6 +92,25 @@
 .bcm-panel button:hover, .bcm-loopbar button:hover { background: #38536b; }
 .bcm-panel .bcm-primary { background: #75d2fa; border-color: #75d2fa; color: #092333; }
 .bcm-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.bcm-shortcut-section {
+  margin: 18px 0 0; padding: 14px 0 0; border: 0; border-top: 1px solid var(--bcm-line);
+}
+.bcm-shortcut-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.bcm-shortcut-section legend { padding: 0; font-size: 15px; font-weight: 650; color: var(--bcm-text); }
+.bcm-panel .bcm-shortcut-reset { min-height: 28px; padding: 4px 10px; font-size: 12px; }
+.bcm-panel .bcm-shortcut-hint { margin: 0 0 12px; font-size: 12px; color: var(--bcm-muted); }
+.bcm-shortcut-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(136px, 168px); gap: 8px; align-items: center; margin: 8px 0;
+}
+.bcm-panel label.bcm-shortcut-label { display: block; margin: 0; font-size: 13px; color: var(--bcm-text); }
+.bcm-shortcut-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.bcm-panel input.bcm-shortcut-input {
+  text-align: center; cursor: pointer; font-family: ui-monospace, Consolas, system-ui, monospace; font-size: 12px;
+}
+.bcm-panel input.bcm-shortcut-input[data-recording="true"] {
+  border-color: var(--bcm-accent); color: var(--bcm-accent); background: #102536;
+}
+.bcm-panel .bcm-shortcut-clear { min-height: 34px; padding: 4px 8px; font-size: 12px; }
 .bcm-panel dl { margin: 14px 0; }
 .bcm-panel dt { margin-top: 12px; font-weight: 650; }
 .bcm-panel dd { margin: 4px 0 0; color: #b8c9dd; }

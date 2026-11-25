@@ -1,10 +1,14 @@
+import { DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS, normalizeShortcut, normalizeShortcutsMap } from './shortcuts.js';
+
 const LEGACY_KEY = 'bili_caption_mask_v200_cfg';
 const GLOBAL_KEY = 'bili_caption_mask_v240_global';
 const SERIES_PREFIX = 'bili_caption_mask_v240_series:';
+const SHORTCUT_META = new Map(SHORTCUT_ACTIONS.map(action => [action.id, action]));
 const DEFAULTS = Object.freeze({
     enabled: true, left: 15, top: 84, width: 70, height: 7.2,
     blur: 14, mode: 'blur', singleKeys: true, leadIn: 3,
-    loopBefore: 3, loopAfter: 3, loopCount: 3, loopGap: 0, playbackRate: 1, reviewBatch: 20
+    loopBefore: 3, loopAfter: 3, loopCount: 3, loopGap: 0, playbackRate: 1, reviewBatch: 20,
+    shortcuts: DEFAULT_SHORTCUTS
 });
 const GEOMETRY = new Set(['left', 'top', 'width', 'height']);
 const BOOLEANS = new Set(['enabled', 'singleKeys']);
@@ -39,10 +43,12 @@ function parse(value) {
 }
 
 function normalize(input) {
-    const output = { ...DEFAULTS };
+    const output = { ...DEFAULTS, shortcuts: { ...DEFAULT_SHORTCUTS } };
     for (const key of Object.keys(DEFAULTS)) {
         const value = input?.[key];
-        if (BOOLEANS.has(key)) {
+        if (key === 'shortcuts') {
+            output.shortcuts = normalizeShortcutsMap(value);
+        } else if (BOOLEANS.has(key)) {
             if (typeof value === 'boolean') output[key] = value;
         } else if (key === 'mode') {
             if (value === 'blur' || value === 'solid') output[key] = value;
@@ -62,7 +68,9 @@ function onlyGeometry(config) {
 }
 
 function onlyGlobal(config) {
-    return Object.fromEntries(Object.keys(DEFAULTS).filter(key => !GEOMETRY.has(key)).map(key => [key, config[key]]));
+    return Object.fromEntries(Object.keys(DEFAULTS).filter(key => !GEOMETRY.has(key)).map(key => [
+        key, key === 'shortcuts' ? { ...config.shortcuts } : config[key]
+    ]));
 }
 
 /** Synchronous settings using GM_getValue/GM_setValue, or localStorage. */
@@ -146,17 +154,34 @@ export function createConfigStore(options = {}) {
         for (const [key, value] of Object.entries(changes)) {
             if (!Object.hasOwn(DEFAULTS, key)) throw new Error(`不支持的设置项：${key}`);
             if (value === undefined) continue;
-            if (BOOLEANS.has(key)) {
+            if (key === 'shortcuts') {
+                if (!isPlain(value)) throw new Error('快捷键设置必须是对象');
+                const normalized = {};
+                for (const [action, spec] of Object.entries(value)) {
+                    const meta = SHORTCUT_META.get(action);
+                    if (!meta) throw new Error(`不支持的快捷键项：${action}`);
+                    if (spec === undefined) continue;
+                    const canonical = normalizeShortcut(spec, { allowModifierOnly: meta.allowModifierOnly });
+                    if (canonical === null) throw new Error(`快捷键 ${action} 格式无效`);
+                    normalized[action] = canonical;
+                }
+                accepted.shortcuts = normalized;
+            } else if (BOOLEANS.has(key)) {
                 if (typeof value !== 'boolean') throw new Error(`设置 ${key} 必须是开关值`);
+                accepted[key] = value;
             } else if (key === 'mode') {
                 if (value !== 'blur' && value !== 'solid') throw new Error('遮罩模式必须是 blur 或 solid');
+                accepted[key] = value;
             } else if (typeof value !== 'number' || !Number.isFinite(value)) {
                 throw new Error(`设置 ${key} 必须是有效数字`);
+            } else {
+                accepted[key] = value;
             }
-            accepted[key] = value;
         }
         const current = get(seriesId);
-        const result = normalize({ ...current, ...accepted });
+        const merged = { ...current, ...accepted };
+        if (accepted.shortcuts) merged.shortcuts = { ...current.shortcuts, ...accepted.shortcuts };
+        const result = normalize(merged);
         const keys = Object.keys(accepted);
         if (keys.some(key => GEOMETRY.has(key))) write(seriesKey(seriesId), onlyGeometry(result));
         if (keys.some(key => !GEOMETRY.has(key))) write(GLOBAL_KEY, onlyGlobal(result));
