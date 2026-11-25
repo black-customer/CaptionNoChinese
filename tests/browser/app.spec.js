@@ -69,6 +69,7 @@ test('scopes update across parts and all three formats download the requested re
   await expect(page.locator('.bcm-tag-episode')).toHaveText('第一段');
   await page.locator('.bcm-note-input').fill('thumb through');
   await page.getByRole('button', { name: '关闭记录库' }).click();
+  await expect(page.locator('.bcm-notebook')).toBeHidden();
   await page.goto(`${origin}/video/BV1Q541167Qg/`);
   await page.waitForFunction(() => document.querySelector('video').readyState >= 2);
   await dockClick(page, 'capture');
