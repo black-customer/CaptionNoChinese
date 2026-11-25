@@ -472,6 +472,29 @@ export function createRepository(options = {}) {
         });
     }
 
+    async function hasSynced(scope, id) {
+        await ready();
+        return transaction(['meta'], 'readonly', (tx, set) => {
+            const request = tx.objectStore('meta').get(`scene-sync:${scope}:${id}`);
+            request.onsuccess = () => set(Boolean(request.result));
+        });
+    }
+
+    async function markSynced(scope, id) {
+        await ready();
+        return transaction(['meta'], 'readwrite', tx => {
+            tx.objectStore('meta').put({ key: `scene-sync:${scope}:${id}`, syncedAt: Date.now() });
+        });
+    }
+
+    async function syncNote(id) {
+        const entry = await get(id);
+        if (!entry) return null;
+        const { imageBlob, hasImage, ...note } = entry;
+        if (imageBlob) note.imageUrl = await blobToDataURL(imageBlob);
+        return note;
+    }
+
     async function exportBackup({ seriesId = null, sourceId = null, query = '', includeImages = true } = {}) {
         const matches = filterNotes(seriesId, sourceId, query);
         await ready();
@@ -535,5 +558,6 @@ export function createRepository(options = {}) {
     }
 
     function close() { closed = true; db?.close(); db = null; }
-    return { ready, list, get, save, update, remove, restore, count, exportBackup, previewImport, importBackup, close };
+    return { ready, list, get, save, update, remove, restore, count, exportBackup, previewImport, importBackup, close,
+        hasSynced, markSynced, syncNote };
 }

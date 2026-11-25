@@ -11,7 +11,7 @@ async function boot(page) {
     body: route.request().url().includes('/__bcm__/bundle.js') ? script : fixture,
   }));
   await page.goto(url);
-  await expect(page.locator('#bcm-app')).toHaveAttribute('data-version', '3.0.1');
+  await expect(page.locator('#bcm-app')).toHaveAttribute('data-version', '3.1.0');
   await expect(page.locator('.bcm-dock')).toBeVisible();
   await page.waitForFunction(() => document.querySelector('video').readyState >= 2);
 }
@@ -277,23 +277,23 @@ test('desktop and narrow layouts keep controls inside the viewport',async({page}
   await page.keyboard.press('Escape');
   await dockClick(page, 'capture');
   await expect(page.locator('.bcm-notification')).toHaveText('已记录 00:42');
-  await page.screenshot({path:'artifacts/v3.0.1-desktop-player.png'});
+  await page.screenshot({path:'artifacts/v3.1.0-desktop-player.png'});
   await dockClick(page, 'notebook');
   await expect(page.locator('.bcm-note-image')).toBeVisible();
   await expect(page.locator('.bcm-notification')).toBeHidden();
-  await page.screenshot({path:'artifacts/v3.0.1-desktop.png'});
+  await page.screenshot({path:'artifacts/v3.1.0-desktop.png'});
   await page.setViewportSize({width:390,height:780});
   const notebook = page.locator('.bcm-notebook');
   await expect(notebook).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   await expect(dock).toHaveCSS('top', '48px');
   expect(await notebook.evaluate(el => el.scrollWidth > el.clientWidth + 1)).toBe(false);
   expect(await notebook.locator('.bcm-notebook-scroll').evaluate(el => el.scrollWidth > el.clientWidth + 1)).toBe(false);
-  await page.screenshot({path:'artifacts/v3.0.1-narrow.png'});
+  await page.screenshot({path:'artifacts/v3.1.0-narrow.png'});
   await notebook.getByRole('button', { name: '设置' }).click();
   const panel = page.locator('.bcm-panel');
   await expect(panel).toHaveCSS('color-scheme', 'light');
   expect(await panel.evaluate(el => el.scrollWidth > el.clientWidth + 1)).toBe(false);
-  await page.screenshot({path:'artifacts/v3.0.1-narrow-settings.png'});
+  await page.screenshot({path:'artifacts/v3.1.0-narrow-settings.png'});
   expect(errors).toEqual([]);
 });
 
@@ -424,4 +424,57 @@ test('custom shortcuts can be recorded, conflict-checked, disabled, persisted an
   await page.keyboard.press('Alt+KeyJ');
   await expect(page.locator('.bcm-notebook')).toBeVisible();
 
+});
+
+test('pairs locally, retries an offline send and skips acknowledged notes after reload', async ({ page }) => {
+  await page.addInitScript(() => {
+    const values = new Map();
+    window.GM_getValue = (key, fallback) => values.get(key) ?? fallback;
+    window.GM_setValue = (key, value) => values.set(key, value);
+    window.GM_xmlhttpRequest = options => {
+      const url = new URL(options.url);
+      if (url.origin !== 'http://127.0.0.1:8765' || options.redirect !== 'error' ||
+          options.headers['X-Scene-Sync-Token'] !== 'synthetic-pair-code') {
+        options.onload({ status: 403, finalUrl: options.url });
+        return;
+      }
+      if (options.method === 'GET') {
+        options.onload({ status: 200, finalUrl: options.url, responseText: '{"ok":true}' });
+        return;
+      }
+      const note = JSON.parse(options.data).notes[0];
+      if (!note.imageUrl.startsWith('data:image/jpeg') || !note.source.url.includes('bilibili.com')) {
+        options.onload({ status: 400, finalUrl: options.url });
+        return;
+      }
+      const count = Number(sessionStorage.getItem('test-push-count') || 0) + 1;
+      sessionStorage.setItem('test-push-count', count);
+      if (count === 1) options.onerror();
+      else options.onload({ status: 200, finalUrl: options.url,
+        responseText: '{"imported":1,"duplicates":0}' });
+    };
+  });
+  await boot(page);
+  await dockClick(page, 'version');
+  page.once('dialog', dialog => dialog.accept('synthetic-pair-code'));
+  await page.getByRole('button', { name: '输入配对码' }).click();
+  await page.getByRole('button', { name: '测试连接' }).click();
+  await expect(page.getByText('桌面学习器连接正常。')).toBeVisible();
+  await page.locator('.bcm-panel').getByRole('button', { name: '关闭', exact: true }).click();
+  await captureAndOpen(page);
+  const send = page.getByRole('button', { name: '发送到本机学习器' });
+  await send.click();
+  await expect(page.getByText(/部分或全部场景待发送/)).toBeVisible();
+  await send.click();
+  await expect(page.getByText('已发送 1 条，跳过 0 条已发送记录。')).toBeVisible();
+  await page.reload();
+  await dockClick(page, 'version');
+  page.once('dialog', dialog => dialog.accept('synthetic-pair-code'));
+  await page.getByRole('button', { name: '输入配对码' }).click();
+  await expect(page.getByText('配对码已保存，可以测试连接。')).toBeVisible();
+  await page.locator('.bcm-panel').getByRole('button', { name: '关闭', exact: true }).click();
+  await dockClick(page, 'notebook');
+  await send.click();
+  await expect(page.getByText('已发送 0 条，跳过 1 条已发送记录。')).toBeVisible();
+  expect(await page.evaluate(() => sessionStorage.getItem('test-push-count'))).toBe('2');
 });

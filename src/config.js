@@ -1,5 +1,6 @@
 import { DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS, normalizeShortcut, normalizeShortcutsMap } from './shortcuts.js';
 
+const SYNC_KEY = 'bili_caption_study_scene_sync';
 const LEGACY_KEY = 'bili_caption_mask_v200_cfg';
 const GLOBAL_KEY = 'bili_caption_mask_v240_global';
 const SERIES_PREFIX = 'bili_caption_mask_v240_series:';
@@ -204,5 +205,22 @@ export function createConfigStore(options = {}) {
     }
 
     function dispose() { disposed = true; }
-    return { get, patch, reset, dispose };
+    function getSync() {
+        checkOpen();
+        const stored = useGM && read(SYNC_KEY);
+        return { base: stored?.base || 'http://127.0.0.1:8765',
+            token: stored?.token || '', auto: stored?.auto === true };
+    }
+
+    function setSync({ base, token, auto }) {
+        checkOpen();
+        if (typeof gmGet !== 'function' || typeof gmSet !== 'function') {
+            throw new Error('当前环境不能安全保存配对，请使用 JSON 备份');
+        }
+        const value = { base, token, auto: Boolean(token) && auto === true };
+        write(SYNC_KEY, value);
+        return value;
+    }
+
+    return { get, patch, reset, dispose, getSync, setSync };
 }

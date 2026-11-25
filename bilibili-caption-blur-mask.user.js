@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 剧集双语字幕羽化遮罩与生词本 (看剧学英语)
 // @namespace    https://github.com/CaptionNoChinese
-// @version      3.0.1
+// @version      3.1.0
 // @description  中文字幕遮罩、单键静默记录、按集整理备注，以及 JSON、Markdown 和 HTML 导出。
 // @author       black-customer
 // @homepageURL  https://github.com/black-customer/CaptionNoChinese
@@ -12,6 +12,9 @@
 // @match        *://bilibili.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
+// @connect      localhost
 // @run-at       document-start
 // @noframes
 // @license      MIT
@@ -1224,6 +1227,26 @@
         };
       });
     }
+    async function hasSynced(scope, id) {
+      await ready();
+      return transaction(["meta"], "readonly", (tx, set) => {
+        const request = tx.objectStore("meta").get(`scene-sync:${scope}:${id}`);
+        request.onsuccess = () => set(Boolean(request.result));
+      });
+    }
+    async function markSynced(scope, id) {
+      await ready();
+      return transaction(["meta"], "readwrite", (tx) => {
+        tx.objectStore("meta").put({ key: `scene-sync:${scope}:${id}`, syncedAt: Date.now() });
+      });
+    }
+    async function syncNote(id) {
+      const entry = await get(id);
+      if (!entry) return null;
+      const { imageBlob, hasImage, ...note } = entry;
+      if (imageBlob) note.imageUrl = await blobToDataURL(imageBlob);
+      return note;
+    }
     async function exportBackup({ seriesId = null, sourceId = null, query = "", includeImages = true } = {}) {
       const matches = filterNotes(seriesId, sourceId, query);
       await ready();
@@ -1306,7 +1329,23 @@
       db?.close();
       db = null;
     }
-    return { ready, list, get, save, update, remove, restore, count, exportBackup, previewImport, importBackup, close };
+    return {
+      ready,
+      list,
+      get,
+      save,
+      update,
+      remove,
+      restore,
+      count,
+      exportBackup,
+      previewImport,
+      importBackup,
+      close,
+      hasSynced,
+      markSynced,
+      syncNote
+    };
   }
 
   // src/shortcuts.js
@@ -1528,6 +1567,7 @@
   }
 
   // src/config.js
+  var SYNC_KEY = "bili_caption_study_scene_sync";
   var LEGACY_KEY2 = "bili_caption_mask_v200_cfg";
   var GLOBAL_KEY = "bili_caption_mask_v240_global";
   var SERIES_PREFIX = "bili_caption_mask_v240_series:";
@@ -1735,7 +1775,25 @@
     function dispose() {
       disposed = true;
     }
-    return { get, patch, reset, dispose };
+    function getSync() {
+      checkOpen();
+      const stored = useGM && read(SYNC_KEY);
+      return {
+        base: stored?.base || "http://127.0.0.1:8765",
+        token: stored?.token || "",
+        auto: stored?.auto === true
+      };
+    }
+    function setSync({ base, token, auto }) {
+      checkOpen();
+      if (typeof gmGet !== "function" || typeof gmSet !== "function") {
+        throw new Error("当前环境不能安全保存配对，请使用 JSON 备份");
+      }
+      const value = { base, token, auto: Boolean(token) && auto === true };
+      write(SYNC_KEY, value);
+      return value;
+    }
+    return { get, patch, reset, dispose, getSync, setSync };
   }
 
   // src/editable.js
@@ -1933,8 +1991,8 @@
     return "<!doctype html>\n" + output.documentElement.outerHTML;
   }
   function createNotebook({ repo, player, notify = () => {
-  }, version = "3.0.1", onChange = () => {
-  }, onHelp, onSettings }) {
+  }, version = "3.1.0", onChange = () => {
+  }, onHelp, onSettings, onSync }) {
     let opened = false;
     let disposed = false;
     let offset = 0;
@@ -1972,6 +2030,12 @@
     }
     const importButton = button("导入备份", () => fileInput.click());
     headerActions.append(importButton);
+    if (onSync) {
+      const syncButton = button("发送到本机学习器", (event) => {
+        if (event.isTrusted) void sendToDesktop(syncButton);
+      });
+      headerActions.append(syncButton);
+    }
     const utilities = node("div", "bcm-header-tools");
     if (onSettings) utilities.append(button("设置", onSettings, "bcm-button-quiet"));
     if (onHelp) utilities.append(button("帮助", onHelp, "bcm-button-quiet"));
@@ -2334,6 +2398,29 @@
       offset = 0;
       void refresh();
     }
+    async function sendToDesktop(action) {
+      const filters2 = scopeFilter();
+      if (!filters2) {
+        setNotice("当前没有可用的视频，请选择「全部记录」。", true);
+        return;
+      }
+      action.disabled = true;
+      try {
+        if (!await flushDrafts()) throw new Error("请先重试保存备注");
+        const data = await repo.exportBackup({ ...filters2, query: searchInput.value.trim(), includeImages: false });
+        if (!data.notes.length) {
+          setNotice("当前范围没有可发送的记录。");
+          return;
+        }
+        setNotice(`正在发送 ${data.notes.length} 条场景…`);
+        const result = await onSync(data.notes.map((note) => note.id));
+        if (!disposed) setNotice(`已发送 ${result.imported} 条，跳过 ${result.skipped} 条已发送记录。`);
+      } catch (error) {
+        if (!disposed) setNotice(`部分或全部场景待发送：${readableError(error)}`, true);
+      } finally {
+        action.disabled = false;
+      }
+    }
     async function download(format, extension, mime, serialize, action) {
       const filters2 = scopeFilter();
       if (!filters2) {
@@ -2471,6 +2558,99 @@
     return { element, open, close, toggle: () => opened ? close() : open(), refresh, refreshSource, dispose, isOpen: () => opened, flushDrafts };
   }
 
+  // src/sync.js
+  function normalizeSyncBase(raw) {
+    const value = String(raw).trim().toLowerCase();
+    if (!/^http:\/\/(?:127\.0\.0\.1|localhost)(?::[0-9]+)?\/?$/.test(value)) {
+      throw new Error("请输入本机 HTTP 地址，例如 http://127.0.0.1:8765");
+    }
+    try {
+      return new URL(value).origin;
+    } catch {
+      throw new Error("本机端口无效");
+    }
+  }
+  function createSync({ repo, read, request }) {
+    let pending = Promise.resolve();
+    function pairing(draft = read()) {
+      if (typeof request !== "function") throw new Error("脚本管理器未提供本机连接接口");
+      const token = draft?.token?.trim();
+      if (!token) throw new Error("请在设置中填写配对码，或使用 JSON 备份");
+      if (!/^[\w-]{1,128}$/.test(token)) throw new Error("配对码格式无效");
+      return { base: normalizeSyncBase(draft.base), token };
+    }
+    function send({ base, token }, endpoint, notes) {
+      const url = base + "/api/captures/scenes/" + endpoint;
+      const headers = { "X-Scene-Sync-Token": token };
+      if (notes) headers["Content-Type"] = "application/json";
+      return new Promise((resolve, reject) => {
+        const failed = () => reject(new Error("无法连接桌面端，请确认服务已启动后重试"));
+        request({
+          method: notes ? "POST" : "GET",
+          url,
+          headers,
+          timeout: 8e3,
+          redirect: "error",
+          anonymous: true,
+          data: notes ? JSON.stringify({ notes }) : void 0,
+          onerror: failed,
+          ontimeout: failed,
+          onabort: failed,
+          onload(response) {
+            if (response.finalUrl && response.finalUrl !== url) {
+              reject(new Error("本机连接返回了意外响应"));
+              return;
+            }
+            if (response.status === 403) {
+              reject(new Error("配对码无效，请重新配对"));
+              return;
+            }
+            try {
+              const result = JSON.parse(response.responseText);
+              if (response.status !== 200) throw new Error("桌面端拒绝了此请求");
+              resolve(result);
+            } catch (error) {
+              reject(new Error("本机连接返回了意外响应", { cause: error }));
+            }
+          }
+        });
+      });
+    }
+    async function ping(draft) {
+      const result = await send(pairing(draft), "ping");
+      if (result?.ok !== true) throw new Error("本机连接返回了意外响应");
+    }
+    function push(ids) {
+      const run = pending.then(async () => {
+        const options = pairing();
+        const digest = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(options.base + "\n" + options.token)
+        );
+        const scope = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        const counts = { imported: 0, skipped: 0 };
+        for (const id of new Set(ids)) {
+          if (await repo.hasSynced(scope, id)) {
+            counts.skipped++;
+            continue;
+          }
+          const note = await repo.syncNote(id);
+          if (!note) continue;
+          const result = await send(options, "inbox", [note]);
+          if (result?.imported === 1 && result.duplicates === 0) counts.imported++;
+          else if (result?.imported === 0 && result.duplicates === 1) counts.skipped++;
+          else throw new Error("桌面端未确认收到记录");
+          await repo.markSynced(scope, id);
+        }
+        return counts;
+      });
+      pending = run.catch(() => {
+      });
+      return run;
+    }
+    return { ping, push };
+  }
+
   // src/app.css
   var app_default = '.bcm-root, .bcm-theme {\n  --bcm-bg: #ffffff;\n  --bcm-subtle: #f7f8fa;\n  --bcm-hover: #f0f2f5;\n  --bcm-line: #e5e7eb;\n  --bcm-line-strong: #d1d5db;\n  --bcm-text: #111827;\n  --bcm-muted: #6b7280;\n  --bcm-primary: #18181b;\n  --bcm-primary-hover: #27272a;\n  --bcm-primary-ink: #ffffff;\n  --bcm-focus: #2563eb;\n  --bcm-danger: #b91c1c;\n  --bcm-danger-bg: #fef2f2;\n  --bcm-shadow: 0 12px 32px rgb(15 23 42 / 10%), 0 2px 6px rgb(15 23 42 / 5%);\n  --bcm-dock-right: 176px;\n  color-scheme: light;\n}\n\n.bcm-root {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483000;\n  pointer-events: none;\n  color: var(--bcm-text);\n  font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif;\n  text-align: start;\n}\n\n.bcm-root [hidden], .bcm-dock[hidden], .bcm-mask[hidden] { display: none !important; }\n.bcm-root *, .bcm-dock, .bcm-dock *, .bcm-mask * { box-sizing: border-box; }\n.bcm-root :focus-visible, .bcm-theme :focus-visible { outline: 2px solid var(--bcm-focus); outline-offset: 2px; }\n.bcm-root button, .bcm-root input, .bcm-root select, .bcm-root textarea, .bcm-theme button { font: inherit; }\n.bcm-root ::selection { background: #dbeafe; color: var(--bcm-text); }\n.bcm-root button:disabled { opacity: .55; cursor: default; }\n.bcm-root .bcm-notebook { z-index: 10; }\n.bcm-root .bcm-panel { z-index: 20; }\n.bcm-root .bcm-notification { z-index: 30; }\n\n.bcm-mask {\n  position: absolute !important;\n  z-index: 25 !important;\n  box-sizing: border-box !important;\n  user-select: none;\n  touch-action: none;\n  cursor: pointer;\n  pointer-events: auto;\n  background: transparent;\n  backdrop-filter: blur(var(--bcm-blur, 14px));\n  -webkit-backdrop-filter: blur(var(--bcm-blur, 14px));\n  mask-image: linear-gradient(to right, transparent, #000 5%, #000 95%, transparent),\n    linear-gradient(to bottom, transparent, #000 16%, #000 84%, transparent);\n  mask-composite: intersect;\n  -webkit-mask-image: linear-gradient(to right, transparent, #000 5%, #000 95%, transparent),\n    linear-gradient(to bottom, transparent, #000 16%, #000 84%, transparent);\n  -webkit-mask-composite: source-in;\n}\n\n.bcm-mask.bcm-solid { background: var(--bcm-primary); backdrop-filter: none; -webkit-backdrop-filter: none; }\n.bcm-mask:not(.bcm-edit):not(.bcm-wheeling):hover, .bcm-mask.bcm-peek:not(.bcm-edit):not(.bcm-wheeling) {\n  background: transparent;\n  backdrop-filter: none;\n  -webkit-backdrop-filter: none;\n  mask-image: none;\n  -webkit-mask-image: none;\n}\n\n.bcm-mask.bcm-edit, .bcm-mask.bcm-wheeling {\n  mask-image: none;\n  -webkit-mask-image: none;\n  outline: 1.5px solid var(--bcm-focus);\n  background: rgb(255 255 255 / 18%);\n  backdrop-filter: blur(3px);\n  cursor: move;\n}\n\n.bcm-mask .bcm-mask-tools {\n  position: absolute;\n  bottom: calc(100% + 8px);\n  right: 0;\n  display: none;\n  align-items: center;\n  gap: 8px;\n  width: max-content;\n  padding: 4px 6px 4px 10px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 8px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: var(--bcm-shadow);\n  font: 12px/1.5 system-ui, "Microsoft YaHei", sans-serif;\n}\n\n.bcm-mask.bcm-edit .bcm-mask-tools { display: flex; }\n.bcm-mask-tools button, .bcm-dock button {\n  appearance: none;\n  margin: 0;\n  min-height: 30px;\n  padding: 5px 8px;\n  border: 0;\n  border-radius: 5px;\n  background: transparent;\n  color: inherit;\n  white-space: nowrap;\n  cursor: pointer;\n}\n.bcm-mask-tools button { background: var(--bcm-subtle); }\n.bcm-dock button:hover, .bcm-mask-tools button:hover, .bcm-dock button[aria-pressed="true"] { background: var(--bcm-hover); }\n.bcm-handle {\n  display: none;\n  position: absolute;\n  width: 12px;\n  height: 12px;\n  background: var(--bcm-bg);\n  border: 1px solid var(--bcm-primary);\n  border-radius: 4px;\n}\n.bcm-edit .bcm-handle { display: block; }\n.bcm-handle[data-handle="n"] { top: -6px; left: calc(50% - 6px); cursor: ns-resize; }\n.bcm-handle[data-handle="s"] { bottom: -6px; left: calc(50% - 6px); cursor: ns-resize; }\n.bcm-handle[data-handle="e"] { right: -6px; top: calc(50% - 6px); cursor: ew-resize; }\n.bcm-handle[data-handle="w"] { left: -6px; top: calc(50% - 6px); cursor: ew-resize; }\n.bcm-handle[data-handle="nw"] { top: -6px; left: -6px; cursor: nwse-resize; }\n.bcm-handle[data-handle="ne"] { top: -6px; right: -6px; cursor: nesw-resize; }\n.bcm-handle[data-handle="sw"] { bottom: -6px; left: -6px; cursor: nesw-resize; }\n.bcm-handle[data-handle="se"] { bottom: -6px; right: -6px; cursor: nwse-resize; }\n\n.bcm-dock {\n  position: absolute;\n  top: 12px;\n  right: var(--bcm-dock-right, 176px);\n  z-index: 100;\n  display: flex;\n  flex-wrap: nowrap;\n  align-items: center;\n  gap: 2px;\n  max-width: calc(100% - 24px);\n  padding: 4px 6px;\n  border: 1px solid rgb(15 23 42 / 8%);\n  border-radius: 10px;\n  background: rgb(255 255 255 / 92%);\n  color: var(--bcm-primary);\n  backdrop-filter: blur(12px);\n  box-shadow: 0 4px 14px rgb(15 23 42 / 10%);\n  font: 12px/1.4 system-ui, "Microsoft YaHei", sans-serif;\n  font-variant-numeric: tabular-nums;\n  transition: opacity .2s ease;\n  pointer-events: auto;\n}\n.bcm-dock.bcm-idle:not(:hover):not(:focus-within) { opacity: 0; pointer-events: none; }\n.bcm-dock .bcm-version-button { color: var(--bcm-muted); }\n\n.bcm-notification {\n  position: absolute;\n  top: 16px;\n  left: 50%;\n  transform: translateX(-50%);\n  width: max-content;\n  max-width: min(620px, var(--bcm-toast-max-width, calc(100% - 32px)));\n  padding: 8px 14px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 20px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: var(--bcm-shadow);\n  overflow-wrap: anywhere;\n  pointer-events: none;\n}\n.bcm-notification[data-kind="success"] { font-size: 13px; font-variant-numeric: tabular-nums; }\n.bcm-notification[data-kind="error"] { color: var(--bcm-danger); }\n\n.bcm-panel {\n  position: absolute;\n  top: 14px;\n  right: 14px;\n  width: min(414px, calc(100% - 28px));\n  max-height: calc(100% - 28px);\n  overflow: auto;\n  overscroll-behavior: contain;\n  padding: 22px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 14px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: var(--bcm-shadow);\n  pointer-events: auto;\n}\n.bcm-panel h2 { margin: 0 0 8px; font-size: 21px; font-weight: 700; }\n.bcm-panel p { margin: 8px 0 16px; color: var(--bcm-muted); }\n.bcm-panel form > label {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(0, 142px);\n  align-items: center;\n  gap: 8px;\n  margin: 10px 0;\n}\n.bcm-panel input, .bcm-panel select {\n  width: 100%;\n  min-width: 0;\n  min-height: 36px;\n  margin: 0;\n  padding: 6px 8px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 6px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n}\n.bcm-panel button {\n  min-height: 34px;\n  margin: 0;\n  padding: 6px 11px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 6px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  cursor: pointer;\n}\n.bcm-panel button:hover { background: var(--bcm-hover); }\n.bcm-panel .bcm-primary {\n  border-color: var(--bcm-primary);\n  background: var(--bcm-primary);\n  color: var(--bcm-primary-ink);\n}\n.bcm-panel .bcm-primary:hover { background: var(--bcm-primary-hover); }\n.bcm-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }\n\n.bcm-shortcut-section {\n  min-width: 0;\n  margin: 20px 0 0;\n  padding: 12px 0 0;\n  border: 0;\n  border-top: 1px solid var(--bcm-line);\n}\n.bcm-shortcut-section legend { padding: 0 8px 0 0; font-size: 15px; font-weight: 650; }\n.bcm-shortcut-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }\n.bcm-panel .bcm-shortcut-hint { margin: 0; font-size: 12px; }\n.bcm-panel .bcm-shortcut-reset, .bcm-panel .bcm-shortcut-clear { padding-inline: 8px; font-size: 12px; }\n.bcm-shortcut-row {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(0, 176px);\n  align-items: center;\n  gap: 8px;\n  margin: 8px 0;\n}\n.bcm-shortcut-label { font-size: 13px; overflow-wrap: anywhere; }\n.bcm-shortcut-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }\n.bcm-panel .bcm-shortcut-input, .bcm-panel kbd {\n  background: var(--bcm-subtle);\n  font: 12px/1.5 ui-monospace, Consolas, "Microsoft YaHei", monospace;\n  text-align: center;\n}\n.bcm-panel .bcm-shortcut-input { cursor: pointer; }\n.bcm-panel .bcm-shortcut-input[data-recording="true"] { border-color: var(--bcm-focus); background: var(--bcm-bg); }\n.bcm-panel kbd { display: inline-block; padding: 2px 6px; border: 1px solid var(--bcm-line); border-radius: 4px; }\n.bcm-panel dl {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);\n  align-items: baseline;\n  gap: 10px 8px;\n  margin: 12px 0 16px;\n  padding: 12px 0;\n  border-block: 1px solid var(--bcm-line);\n}\n.bcm-panel dt { font-weight: 600; }\n.bcm-panel dd { margin: 0; color: var(--bcm-muted); }\n\n@media (max-width: 640px) {\n  .bcm-dock { top: 48px; right: 12px; flex-wrap: wrap; }\n}\n@media (max-width: 440px) {\n  .bcm-panel { padding: 16px; }\n  .bcm-shortcut-row { grid-template-columns: minmax(0, 1fr) minmax(0, 55%); }\n}\n@media (prefers-reduced-motion: reduce) { .bcm-dock { transition: none; } }\n';
 
@@ -2478,7 +2658,7 @@
   var notebook_default = ".bcm-notebook {\n  position: absolute;\n  inset-block: 0;\n  inset-inline-end: 0;\n  display: flex;\n  flex-direction: column;\n  box-sizing: border-box;\n  width: min(432px, 100%);\n  overflow: hidden;\n  border-inline-start: 1px solid var(--bcm-line);\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: -12px 0 32px rgb(15 23 42 / 10%);\n  pointer-events: auto;\n}\n.bcm-notebook:focus { outline: none; }\n.bcm-notebook h2, .bcm-notebook h3, .bcm-notebook p { margin: 0; padding: 0; }\n.bcm-notebook-header {\n  flex: none;\n  padding: 18px 18px 16px;\n  border-block-end: 1px solid var(--bcm-line);\n  background: var(--bcm-bg);\n}\n.bcm-heading-row, .bcm-header-tools, .bcm-toolbar {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 6px;\n}\n.bcm-notebook .bcm-notebook-title {\n  margin-inline-end: auto;\n  font-size: 21px;\n  line-height: 1.3;\n  font-weight: 700;\n}\n.bcm-notebook .bcm-subtitle { margin-block: 4px 14px; color: var(--bcm-muted); }\n.bcm-notebook .bcm-button {\n  appearance: none;\n  min-height: 34px;\n  max-width: 100%;\n  margin: 0;\n  padding: 6px 8px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 6px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  font-size: 13px;\n  line-height: 1.35;\n  text-align: center;\n  overflow-wrap: anywhere;\n  cursor: pointer;\n  touch-action: manipulation;\n}\n.bcm-notebook .bcm-button:hover:not(:disabled) { background: var(--bcm-hover); }\n.bcm-notebook .bcm-button-primary {\n  border-color: var(--bcm-primary);\n  background: var(--bcm-primary);\n  color: var(--bcm-primary-ink);\n  font-weight: 600;\n}\n.bcm-notebook .bcm-button-primary:hover:not(:disabled) { background: var(--bcm-primary-hover); }\n.bcm-notebook .bcm-button-quiet { background: transparent; border-color: transparent; }\n.bcm-notebook .bcm-delete { color: var(--bcm-muted); }\n.bcm-notebook .bcm-delete:hover:not(:disabled) { color: var(--bcm-danger); background: var(--bcm-danger-bg); }\n\n.bcm-notebook-scroll {\n  flex: 1;\n  min-height: 0;\n  overflow: auto;\n  overscroll-behavior: contain;\n  scrollbar-color: var(--bcm-line-strong) var(--bcm-bg);\n  scrollbar-width: thin;\n}\n.bcm-filters { display: grid; gap: 8px; padding: 16px 18px 12px; }\n.bcm-field { display: grid; gap: 6px; min-width: 0; }\n.bcm-label { color: var(--bcm-muted); font-size: 12px; line-height: 1.4; }\n.bcm-filter-row { display: grid; grid-template-columns: minmax(0, 132px) minmax(0, 1fr); gap: 8px; }\n.bcm-notebook .bcm-input, .bcm-notebook .bcm-select {\n  appearance: auto;\n  display: block;\n  width: 100%;\n  min-width: 0;\n  min-height: 38px;\n  margin: 0;\n  padding: 7px 9px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 7px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n}\n.bcm-notebook .bcm-input::placeholder { color: var(--bcm-muted); opacity: 1; }\n.bcm-notebook textarea.bcm-input { min-height: 66px; resize: vertical; overflow-wrap: anywhere; background: var(--bcm-subtle); }\n.bcm-notebook textarea.bcm-input:focus { background: var(--bcm-bg); }\n.bcm-result-summary, .bcm-page-label, .bcm-save-state {\n  color: var(--bcm-muted);\n  font-size: 12px;\n  font-variant-numeric: tabular-nums;\n}\n.bcm-notices, .bcm-undo, .bcm-import-preview {\n  margin: 0 18px 12px;\n  padding: 10px 12px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 8px;\n  background: var(--bcm-subtle);\n  overflow-wrap: anywhere;\n}\n.bcm-notices, .bcm-undo { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-notices > span, .bcm-undo > span { flex: 1 1 180px; }\n.bcm-notice-error { color: var(--bcm-danger); background: var(--bcm-danger-bg); }\n.bcm-notebook .bcm-import-preview h3 { font-size: 15px; margin-block-end: 6px; }\n.bcm-notebook .bcm-import-preview p { margin-block-end: 10px; }\n\n.bcm-note-list { padding-inline: 18px; }\n.bcm-note {\n  display: grid;\n  min-width: 0;\n  gap: 10px;\n  padding-block: 16px 18px;\n  border-block-start: 1px solid var(--bcm-line);\n}\n.bcm-meta-tags { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }\n.bcm-tag-series, .bcm-tag-episode {\n  max-width: 100%;\n  padding: 3px 8px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 14px;\n  background: var(--bcm-subtle);\n  color: #374151;\n  font-size: 12px;\n  overflow-wrap: anywhere;\n}\n.bcm-tag-series { font-weight: 600; }\n.bcm-tag-episode { background: var(--bcm-bg); }\n.bcm-image-placeholder {\n  display: grid;\n  place-items: center;\n  aspect-ratio: 16 / 9;\n  overflow: hidden;\n  border-radius: 8px;\n  background: var(--bcm-subtle);\n  color: var(--bcm-muted);\n  font-size: 13px;\n  text-align: center;\n}\n.bcm-note-image { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }\n.bcm-playback-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }\n.bcm-notebook .bcm-play-button { font-variant-numeric: tabular-nums; font-weight: 600; }\n.bcm-save-state { text-align: end; }\n.bcm-save-error { color: var(--bcm-danger); }\n.bcm-empty { padding: 26px 0; border-block-start: 1px solid var(--bcm-line); color: var(--bcm-muted); }\n.bcm-notebook .bcm-empty h3 { margin-block-end: 6px; color: var(--bcm-text); font-size: 16px; }\n.bcm-pagination {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  flex-wrap: wrap;\n  gap: 8px;\n  padding: 12px 18px;\n  border-block-start: 1px solid var(--bcm-line);\n}\n.bcm-notebook .bcm-storage-note { padding: 12px 18px 18px; color: var(--bcm-muted); font-size: 12px; }\n\n@media (max-width: 440px) {\n  .bcm-notebook-header, .bcm-filters, .bcm-note-list, .bcm-pagination { padding-inline: 12px; }\n  .bcm-notebook-header .bcm-toolbar .bcm-button { padding-inline: 6px; font-size: 12px; }\n  .bcm-notices, .bcm-undo, .bcm-import-preview { margin-inline: 12px; }\n  .bcm-notebook .bcm-input, .bcm-notebook .bcm-select { font-size: 16px; }\n}\n@media (max-height: 420px) {\n  .bcm-notebook-header { padding-block: 8px; }\n  .bcm-notebook .bcm-subtitle { display: none; }\n  .bcm-notebook-header .bcm-toolbar { margin-block-start: 6px; }\n}\n@media (forced-colors: active) {\n  .bcm-notebook { border-color: CanvasText; }\n  .bcm-notebook .bcm-button { border-color: ButtonText; }\n}\n";
 
   // src/main.js
-  var VERSION = "3.0.1";
+  var VERSION = "3.1.0";
   var clamp = (n, low, high) => Math.max(low, Math.min(high, n));
   var BUTTON_LIKE = 'button, a[href], summary, [role="button"], [role="link"]';
   var SLIDER_LIKE = 'input[type="range"], [role="slider"]';
@@ -2521,6 +2701,11 @@
     const gmSet = typeof GM_setValue === "function" ? GM_setValue : void 0;
     const repo = createRepository({ localStorage: local, gmGet, gmSet });
     const settings = createConfigStore({ localStorage: local, gmGet, gmSet, window });
+    const sync = createSync({
+      repo,
+      read: settings.getSync,
+      request: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : void 0
+    });
     const player = createPlayerAdapter({ window, document });
     let snapshot = null, config, container, mask, dock, resizeObserver, mountAbort;
     let edit = false, peek = false, wheeling = false, captureBusy = false, initialized = false;
@@ -2716,6 +2901,46 @@
         shortcutInputs.set(action.id, input);
       }
       form.append(shortcutSection);
+      const desktopSection = el("fieldset", "bcm-shortcut-section");
+      desktopSection.append(el("legend", "", "同步到本机英语学习器"));
+      const baseLabel = el("label");
+      baseLabel.append(el("span", "", "本机地址"));
+      const baseInput = el("input");
+      baseInput.type = "text";
+      baseInput.autocomplete = "off";
+      const savedSync = settings.getSync();
+      baseInput.value = savedSync.base;
+      baseLabel.append(baseInput);
+      const autoLabel = el("label");
+      const autoInput = el("input");
+      autoInput.type = "checkbox";
+      autoInput.checked = savedSync.auto;
+      autoLabel.append(el("span", "", "记录后自动发送"), autoInput);
+      const syncStatus = el("p", "bcm-shortcut-hint", savedSync.token ? "已保存配对码。" : "配对码请从桌面端设置获取。");
+      syncStatus.setAttribute("role", "status");
+      const pairActions = el("div", "bcm-panel-actions");
+      const trusted = (event, action) => {
+        if (event.isTrusted) Promise.resolve().then(action).catch((error) => {
+          syncStatus.textContent = error.message;
+        });
+      };
+      pairActions.append(button2("输入配对码", (event) => trusted(event, () => {
+        const base = normalizeSyncBase(baseInput.value);
+        const token = window.prompt("粘贴桌面英语学习器显示的配对码", "")?.trim();
+        if (!token) return;
+        if (!/^[\w-]{1,128}$/.test(token)) throw new Error("配对码格式无效");
+        settings.setSync({ base, token, auto: autoInput.checked });
+        syncStatus.textContent = "配对码已保存，可以测试连接。";
+      })), button2("测试连接", (event) => trusted(event, async () => {
+        await sync.ping({ base: baseInput.value, token: settings.getSync().token });
+        syncStatus.textContent = "桌面学习器连接正常。";
+      })), button2("清除配对", (event) => trusted(event, () => {
+        settings.setSync({ base: savedSync.base, token: "", auto: false });
+        autoInput.checked = false;
+        syncStatus.textContent = "已清除配对。场景仍可通过 JSON 导出。";
+      })));
+      desktopSection.append(baseLabel, autoLabel, pairActions, syncStatus);
+      form.append(desktopSection);
       const actions = el("div", "bcm-panel-actions");
       const submit = el("button", "bcm-primary", "保存设置");
       submit.type = "submit";
@@ -2739,6 +2964,18 @@
           return;
         }
         patch.shortcuts = { ...shortcutDrafts };
+        if (event.isTrusted && settings.getSync().token) {
+          try {
+            settings.setSync({
+              base: normalizeSyncBase(baseInput.value),
+              token: settings.getSync().token,
+              auto: autoInput.checked
+            });
+          } catch (error) {
+            syncStatus.textContent = error.message;
+            return;
+          }
+        }
         try {
           config = settings.patch(snapshot.identity.seriesId, patch);
           peek = false;
@@ -2759,7 +2996,8 @@
       version: VERSION,
       onChange: updateCount,
       onHelp: showHelp,
-      onSettings: showSettings
+      onSettings: showSettings,
+      onSync: (ids) => sync.push(ids)
     });
     root.append(notebook.element);
     async function updateCount() {
@@ -2831,7 +3069,7 @@
         wakeDock();
       }
     }
-    async function capture() {
+    async function capture(event) {
       if (captureBusy || !snapshot) return;
       captureBusy = true;
       try {
@@ -2855,6 +3093,9 @@
         };
         if (shot.imageBlob) note.imageBlob = shot.imageBlob;
         await repo.save(note);
+        if (event?.isTrusted && settings.getSync().auto) {
+          void sync.push([note.id]).catch((error) => notify(`记录已留在本机，暂未发送 · ${error.message}`));
+        }
         notify(shot.imageBlob ? `已记录 ${note.timeStr}` : `已记录 ${note.timeStr}，截图不可用`, { kind: "success", duration: 1600 });
         void updateCount();
         if (notebook.isOpen()) void notebook.refresh();
@@ -2964,9 +3205,9 @@
         ["notebook", "记录库", () => notebook.toggle().catch(fail2)],
         ["help", "帮助", showHelp]
       ]) {
-        const b = button2(title, () => {
+        const b = button2(title, (event) => {
           try {
-            action();
+            action(event);
           } catch (error) {
             fail2(error);
           }
@@ -3083,7 +3324,7 @@
         event.preventDefault();
         event.stopImmediatePropagation();
         try {
-          action();
+          action(event);
         } catch (error) {
           fail2(error);
         }

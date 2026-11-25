@@ -156,7 +156,7 @@ function exportHtml({ notes, exportedAt }, scopeLabel) {
 }
 
 /** Non-modal notebook. The caller owns attachment and fullscreen placement. */
-export function createNotebook({ repo, player, notify = () => {}, version = '3.0.1', onChange = () => {}, onHelp, onSettings }) {
+export function createNotebook({ repo, player, notify = () => {}, version = '3.1.0', onChange = () => {}, onHelp, onSettings, onSync }) {
     let opened = false;
     let disposed = false;
     let offset = 0;
@@ -195,6 +195,12 @@ export function createNotebook({ repo, player, notify = () => {}, version = '3.0
     }
     const importButton = button('导入备份', () => fileInput.click());
     headerActions.append(importButton);
+    if (onSync) {
+        const syncButton = button('发送到本机学习器', event => {
+            if (event.isTrusted) void sendToDesktop(syncButton);
+        });
+        headerActions.append(syncButton);
+    }
     const utilities = node('div', 'bcm-header-tools');
     if (onSettings) utilities.append(button('设置', onSettings, 'bcm-button-quiet'));
     if (onHelp) utilities.append(button('帮助', onHelp, 'bcm-button-quiet'));
@@ -551,6 +557,22 @@ export function createNotebook({ repo, player, notify = () => {}, version = '3.0
         if (!opened || scopeSelect.value === 'all') return;
         offset = 0;
         void refresh();
+    }
+
+    async function sendToDesktop(action) {
+        const filters = scopeFilter();
+        if (!filters) { setNotice('当前没有可用的视频，请选择「全部记录」。', true); return; }
+        action.disabled = true;
+        try {
+            if (!(await flushDrafts())) throw new Error('请先重试保存备注');
+            const data = await repo.exportBackup({ ...filters, query: searchInput.value.trim(), includeImages: false });
+            if (!data.notes.length) { setNotice('当前范围没有可发送的记录。'); return; }
+            setNotice(`正在发送 ${data.notes.length} 条场景…`);
+            const result = await onSync(data.notes.map(note => note.id));
+            if (!disposed) setNotice(`已发送 ${result.imported} 条，跳过 ${result.skipped} 条已发送记录。`);
+        } catch (error) {
+            if (!disposed) setNotice(`部分或全部场景待发送：${readableError(error)}`, true);
+        } finally { action.disabled = false; }
     }
 
     async function download(format, extension, mime, serialize, action) {

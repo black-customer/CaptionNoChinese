@@ -2,6 +2,7 @@ import { createRepository } from './storage.js';
 import { createPlayerAdapter, formatTime } from './player.js';
 import { createConfigStore } from './config.js';
 import { createNotebook } from './notebook.js';
+import { createSync, normalizeSyncBase } from './sync.js';
 import { getDeepActiveElement, isEditableEvent as editable } from './editable.js';
 import { DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS, eventToShortcut, findShortcutConflict, formatShortcut, matchesPeekRelease } from './shortcuts.js';
 import appStyles from './app.css';
@@ -41,6 +42,8 @@ function start() {
   const gmSet = typeof GM_setValue === 'function' ? GM_setValue : undefined;
   const repo = createRepository({ localStorage: local, gmGet, gmSet });
   const settings = createConfigStore({ localStorage: local, gmGet, gmSet, window });
+  const sync = createSync({ repo, read: settings.getSync,
+    request: typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : undefined });
   const player = createPlayerAdapter({ window, document });
   let snapshot = null, config, container, mask, dock, resizeObserver, mountAbort;
   let edit = false, peek = false, wheeling = false, captureBusy = false, initialized = false;
@@ -204,6 +207,41 @@ function start() {
       shortcutInputs.set(action.id, input);
     }
     form.append(shortcutSection);
+    const desktopSection = el('fieldset', 'bcm-shortcut-section');
+    desktopSection.append(el('legend', '', '同步到本机英语学习器'));
+    const baseLabel = el('label');
+    baseLabel.append(el('span', '', '本机地址'));
+    const baseInput = el('input');
+    baseInput.type = 'text'; baseInput.autocomplete = 'off';
+    const savedSync = settings.getSync();
+    baseInput.value = savedSync.base;
+    baseLabel.append(baseInput);
+    const autoLabel = el('label');
+    const autoInput = el('input'); autoInput.type = 'checkbox'; autoInput.checked = savedSync.auto;
+    autoLabel.append(el('span', '', '记录后自动发送'), autoInput);
+    const syncStatus = el('p', 'bcm-shortcut-hint', savedSync.token ? '已保存配对码。' : '配对码请从桌面端设置获取。');
+    syncStatus.setAttribute('role', 'status');
+    const pairActions = el('div', 'bcm-panel-actions');
+    const trusted = (event, action) => {
+      if (event.isTrusted) Promise.resolve().then(action).catch(error => { syncStatus.textContent = error.message; });
+    };
+    pairActions.append(button('输入配对码', event => trusted(event, () => {
+      const base = normalizeSyncBase(baseInput.value);
+      const token = window.prompt('粘贴桌面英语学习器显示的配对码', '')?.trim();
+      if (!token) return;
+      if (!/^[\w-]{1,128}$/.test(token)) throw new Error('配对码格式无效');
+      settings.setSync({ base, token, auto: autoInput.checked });
+      syncStatus.textContent = '配对码已保存，可以测试连接。';
+    })), button('测试连接', event => trusted(event, async () => {
+      await sync.ping({ base: baseInput.value, token: settings.getSync().token });
+      syncStatus.textContent = '桌面学习器连接正常。';
+    })), button('清除配对', event => trusted(event, () => {
+      settings.setSync({ base: savedSync.base, token: '', auto: false });
+      autoInput.checked = false;
+      syncStatus.textContent = '已清除配对。场景仍可通过 JSON 导出。';
+    })));
+    desktopSection.append(baseLabel, autoLabel, pairActions, syncStatus);
+    form.append(desktopSection);
     const actions = el('div', 'bcm-panel-actions');
     const submit = el('button', 'bcm-primary', '保存设置'); submit.type = 'submit';
     actions.append(submit, button('重置本剧位置', () => {
@@ -218,12 +256,18 @@ function start() {
         return;
       }
       patch.shortcuts = { ...shortcutDrafts };
+      if (event.isTrusted && settings.getSync().token) {
+        try {
+          settings.setSync({ base: normalizeSyncBase(baseInput.value), token: settings.getSync().token,
+            auto: autoInput.checked });
+        } catch (error) { syncStatus.textContent = error.message; return; }
+      }
       try { config = settings.patch(snapshot.identity.seriesId, patch); peek = false; paint(); closePanel(); notify('设置已保存'); } catch (error) { fail(error); }
     });
     panel.append(form); inputs.get('mode').focus();
   }
   const notebook = createNotebook({ repo, player, notify, version: VERSION, onChange: updateCount,
-    onHelp: showHelp, onSettings: showSettings });
+    onHelp: showHelp, onSettings: showSettings, onSync: ids => sync.push(ids) });
   root.append(notebook.element);
 
   async function updateCount() {
@@ -277,7 +321,7 @@ function start() {
     notify(edit ? '拖动遮罩或边缘手柄调整，完成后点击「完成调节」' : '遮罩已锁定');
   }
   function toggleMask() { if (snapshot) { config = settings.patch(configSeries, { enabled: !config.enabled }); paint(); wakeDock(); } }
-  async function capture() {
+  async function capture(event) {
     if (captureBusy || !snapshot) return;
     captureBusy = true;
     try {
@@ -296,6 +340,9 @@ function start() {
       };
       if (shot.imageBlob) note.imageBlob = shot.imageBlob;
       await repo.save(note);
+      if (event?.isTrusted && settings.getSync().auto) {
+        void sync.push([note.id]).catch(error => notify(`记录已留在本机，暂未发送 · ${error.message}`));
+      }
       notify(shot.imageBlob ? `已记录 ${note.timeStr}` : `已记录 ${note.timeStr}，截图不可用`, { kind: 'success', duration: 1600 });
       void updateCount();
       if (notebook.isOpen()) void notebook.refresh();
@@ -358,7 +405,7 @@ function start() {
       ['version', `v${VERSION}`, showSettings], ['toggle', '遮罩 开', toggleMask], ['edit', '调节', toggleEdit],
       ['capture', '记录', capture], ['notebook', '记录库', () => notebook.toggle().catch(fail)], ['help', '帮助', showHelp],
     ]) {
-      const b = button(title, () => { try { action(); } catch (error) { fail(error); } }, name === 'version' ? 'bcm-version-button' : '');
+      const b = button(title, event => { try { action(event); } catch (error) { fail(error); } }, name === 'version' ? 'bcm-version-button' : '');
       b.dataset.action = name; dock.append(b);
     }
     container.append(mask, dock);
@@ -435,7 +482,7 @@ function start() {
     else if (spec === shortcuts.editMask) action = toggleEdit;
     if (action) {
       event.preventDefault(); event.stopImmediatePropagation();
-      try { action(); } catch (error) { fail(error); }
+      try { action(event); } catch (error) { fail(error); }
       if (action !== capture) wakeDock();
     }
   }, { capture: true, signal: events.signal });

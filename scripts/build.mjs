@@ -18,6 +18,9 @@ const metadata = `// ==UserScript==
 // @match        *://bilibili.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
+// @connect      localhost
 // @run-at       document-start
 // @noframes
 // @license      MIT
