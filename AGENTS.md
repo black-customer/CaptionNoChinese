@@ -4,7 +4,7 @@
 
 ## 1. 项目概览与目录结构
 
-本项目以 **桌面 B 站双语字幕遮罩与场景记录库（Userscript v3.0.0）** 为主交付物，并包含独立的 Android 原型目录：
+本项目以 **桌面 B 站双语字幕遮罩与场景记录库（Userscript v3.0.1）** 为主交付物，并包含独立的 Android 原型目录：
 
 - `src/` — Userscript 模块化源码（唯一真相源）
   - `main.js` — 入口、播放器挂载、遮罩交互、全局快捷键、设置/帮助面板
@@ -25,7 +25,7 @@
 
 1. **源码优先，禁止只改构建产物**：修改任何功能必须编辑 `src/`，然后运行 `npm run build`（或 `npm run check`）同步重新生成 `bilibili-caption-blur-mask.user.js` 和 `bilibili-caption-blur-mask.meta.js`。
 2. **保持安装元数据稳定**：`scripts/build.mjs` 中的 `@name`、`@namespace`、`@updateURL`、`@downloadURL` 不可随意更改，确保老用户的脚本管理器能平滑覆盖升级。
-3. **快捷键防误触硬性要求**：任何新增键盘快捷键都必须复用 `src/editable.js` 的 `isEditableEvent`，穿透检查 B 站 Shadow DOM 评论区（`composedPath()` + 深层 `activeElement`），并避开设置/帮助面板和可聚焦交互控件。
+3. **快捷键防误触硬性要求**：任何新增键盘快捷键都必须复用 `src/editable.js` 的 `isEditableEvent`，穿透检查 B 站 Shadow DOM 评论区（`composedPath()` + 深层 `activeElement`），并避开设置/帮助面板。焦点在按钮、链接或滑块上时，仅让位给这些控件自身的激活或调节键，字母和组合快捷键仍可使用。
 4. **存储安全与诚实文案**：
    - IndexedDB 写操作必须等待事务 `oncomplete` 才能提示成功；
    - 保持 `BiliCaptionStudyDB` v2 与 JSON 备份 schema v1 兼容，保留旧记录中的标签和复习字段；
@@ -62,7 +62,7 @@ npm run test:browser   # 运行 Playwright 无头浏览器集成测试
 
 ## 5. 发版同步检查清单（Userscript 升级必做）
 
-当向用户发布新版本（例如 `v3.0.0`）时，以下文件必须**同步更新为同一版本号**，缺一不可：
+当向用户发布新版本（例如 `v3.0.1`）时，以下文件必须**同步更新为同一版本号**，缺一不可：
 
 - [ ] `package.json`（`version`）
 - [ ] `package-lock.json`（顶层与 `packages[""].version`）

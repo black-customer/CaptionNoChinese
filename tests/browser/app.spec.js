@@ -11,7 +11,7 @@ async function boot(page) {
     body: route.request().url().includes('/__bcm__/bundle.js') ? script : fixture,
   }));
   await page.goto(url);
-  await expect(page.locator('#bcm-app')).toHaveAttribute('data-version', '3.0.0');
+  await expect(page.locator('#bcm-app')).toHaveAttribute('data-version', '3.0.1');
   await expect(page.locator('.bcm-dock')).toBeVisible();
   await page.waitForFunction(() => document.querySelector('video').readyState >= 2);
 }
@@ -125,17 +125,25 @@ test('scopes update across parts and all three formats download the requested re
   await expect.poll(()=>page.evaluate(()=>window.fixture.time)).toBe(40);
 });
 
-test('native fullscreen keeps the notebook visible and keyboard close restores focus', async ({page}) => {
-  await boot(page);await page.getByRole('button',{name:'进入播放器全屏',exact:true}).click();
-  await page.locator('#fullscreen').evaluate(button => button.blur());
+test('native fullscreen retains shortcut access while its button is focused', async ({page}) => {
+  await boot(page);
+  const fullscreenButton = page.getByRole('button', { name: '进入播放器全屏' });
+  await fullscreenButton.click();
+  await expect(fullscreenButton).toBeFocused();
+  await page.keyboard.press('c');
+  await expect(page.locator('.bcm-notification')).toHaveText('已记录 00:42');
   await page.keyboard.press('Alt+b');await expect(page.locator('.bcm-notebook')).toBeVisible();
   expect(await page.evaluate(()=>document.fullscreenElement.contains(document.querySelector('#bcm-app')))).toBe(true);
   await page.keyboard.press('Escape');await expect(page.locator('.bcm-notebook')).toBeHidden();
   expect(await page.locator('.bcm-notebook').evaluate(node=>node.inert)).toBe(true);
+  await expect(fullscreenButton).toBeFocused();
 });
 
-test('C records silently while Alt and Alt+A control the mask', async ({ page }) => {
+test('defaults keep working on the progress slider and after focus returns to the toolbar', async ({ page }) => {
   await boot(page);
+  const slider = page.getByRole('slider', { name: '播放进度' });
+  await slider.focus();
+  await expect(slider).toBeFocused();
   const mask = page.locator('.bcm-mask');
   await page.keyboard.down('Alt');
   await expect(mask).toHaveClass(/bcm-peek/);
@@ -156,6 +164,12 @@ test('C records silently while Alt and Alt+A control the mask', async ({ page })
   const toast = page.locator('.bcm-notification');
   await expect(toast).toHaveText('已记录 00:42');
   await expect(toast).toHaveCSS('pointer-events', 'none');
+  const player = page.locator('.bpx-player-video-wrap');
+  const playerBounds = await player.boundingBox();
+  const toastBounds = await toast.boundingBox();
+  expect(toastBounds.y - playerBounds.y).toBeCloseTo(56, 0);
+  expect(toastBounds.x + toastBounds.width / 2).toBeCloseTo(playerBounds.x + playerBounds.width / 2, 0);
+  expect(toastBounds.y + toastBounds.height).toBeLessThan(playerBounds.y + playerBounds.height);
   await expect(page.locator('[data-action=notebook]')).toHaveText('记录库 1');
   await expect(page.locator('.bcm-notebook')).toBeHidden();
   await expect(page.locator('.bcm-panel')).toBeHidden();
@@ -165,6 +179,61 @@ test('C records silently while Alt and Alt+A control the mask', async ({ page })
   await expect(page.locator('.bcm-notebook')).toBeVisible();
   await page.keyboard.press('Alt+b');
   await expect(page.locator('.bcm-notebook')).toBeHidden();
+  await expect(slider).toBeFocused();
+  await dockClick(page, 'notebook');
+  await page.getByRole('button', { name: '关闭记录库' }).click();
+  await expect(page.locator('[data-action="notebook"]')).toBeFocused();
+  await page.keyboard.press('c');
+  await expect(page.locator('[data-action="notebook"]')).toHaveText('记录库 2');
+  await page.keyboard.press('Alt+b');
+  await expect(page.locator('.bcm-note')).toHaveCount(2);
+});
+
+test('custom Space and arrow shortcuts yield to focused controls and work on the player container', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('bili_caption_mask_v240_global',
+    JSON.stringify({ shortcuts: { capture: 'Space', toggleMask: 'ArrowRight' } })));
+  await boot(page);
+  const play = page.getByRole('button', { name: '播放 / 暂停' });
+  const mask = page.locator('.bcm-mask');
+  await play.focus();
+  await page.keyboard.press('Space');
+  await expect.poll(() => page.evaluate(() => window.fixture.pauses)).toBe(1);
+  await expect(page.locator('[data-action="notebook"]')).toHaveText('记录库 0');
+  const slider = page.getByRole('slider', { name: '播放进度' });
+  await slider.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(slider).toHaveValue('43');
+  await expect(mask).toBeVisible();
+
+  await page.locator('.bpx-player-video-wrap').focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(mask).toBeHidden();
+  await page.keyboard.press('Space');
+  await expect(page.locator('[data-action="notebook"]')).toHaveText('记录库 1');
+});
+
+test('empty episode and search results do not download files', async ({ page }) => {
+  await boot(page);
+  const downloads = [];
+  page.on('download', download => downloads.push(download.suggestedFilename()));
+  await dockClick(page, 'notebook');
+  await expect(page.locator('.bcm-result-summary')).toHaveText('本集共 0 条记录');
+  const notice = page.locator('.bcm-notices');
+  for (const format of ['JSON', 'Markdown', 'HTML']) {
+    const exportButton = page.getByRole('button', { name: `导出 ${format}` });
+    await exportButton.click();
+    await expect(exportButton).toBeEnabled();
+    await expect(notice.getByText('当前范围没有可导出的记录。', { exact: true })).toBeVisible();
+  }
+  await page.getByRole('button', { name: '关闭记录库' }).click();
+  await page.keyboard.press('c');
+  await expect(page.locator('[data-action="notebook"]')).toHaveText('记录库 1');
+  await page.keyboard.press('Alt+b');
+  await page.getByRole('searchbox', { name: '搜索记录' }).fill('未出现的词');
+  await expect(page.locator('.bcm-result-summary')).toHaveText('本集共 1 条记录 · 匹配 0 条');
+  await page.getByRole('button', { name: '导出 Markdown' }).click();
+  await expect(notice.getByText('当前范围没有可导出的记录。', { exact: true })).toBeVisible();
+  expect(downloads).toEqual([]);
 });
 
 test('input focus and repeated keydown do not create duplicate captures; outside wheel is preserved', async ({page}) => {
@@ -172,10 +241,12 @@ test('input focus and repeated keydown do not create duplicate captures; outside
   await page.keyboard.press('c');
   const outside=await page.evaluate(()=>{const e=new WheelEvent('wheel',{bubbles:true,cancelable:true,altKey:true,deltaY:10});document.querySelector('.outside').dispatchEvent(e);return e.defaultPrevented;});
   expect(outside).toBe(false);
-  await page.locator('h1').click();
+  await page.getByRole('button', { name: '播放 / 暂停' }).focus();
   await page.evaluate(()=>{window.dispatchEvent(new KeyboardEvent('keydown',{key:'c',code:'KeyC',repeat:true,bubbles:true,cancelable:true}));});
   await dockClick(page,'notebook');await expect(page.locator('.bcm-note')).toHaveCount(0);
-  await page.getByRole('button',{name:'关闭记录库',exact:true}).click();await page.locator('h1').click();await page.keyboard.press('c');
+  await page.getByRole('button',{name:'关闭记录库',exact:true}).click();
+  await expect(page.locator('[data-action="notebook"]')).toBeFocused();
+  await page.keyboard.press('c');
   await expect(page.locator('.bcm-notification')).toContainText('已记录');await dockClick(page,'notebook');await expect(page.locator('.bcm-note')).toHaveCount(1);
 });
 
@@ -200,27 +271,29 @@ test('desktop and narrow layouts keep controls inside the viewport',async({page}
   const nativeBounds = await page.locator('.native-actions').boundingBox();
   expect(dockBounds.x + dockBounds.width).toBeLessThan(nativeBounds.x);
   await mkdir('artifacts',{recursive:true});
-  await page.screenshot({path:'artifacts/v3.0.0-desktop-player.png'});
   await dockClick(page, 'help');
   await expect(page.locator('.bcm-panel')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   await expect(page.locator('.bcm-panel')).toContainText('Alt + 滚轮');
   await page.keyboard.press('Escape');
-  await captureAndOpen(page);
+  await dockClick(page, 'capture');
+  await expect(page.locator('.bcm-notification')).toHaveText('已记录 00:42');
+  await page.screenshot({path:'artifacts/v3.0.1-desktop-player.png'});
+  await dockClick(page, 'notebook');
   await expect(page.locator('.bcm-note-image')).toBeVisible();
   await expect(page.locator('.bcm-notification')).toBeHidden();
-  await page.screenshot({path:'artifacts/v3.0.0-desktop.png'});
+  await page.screenshot({path:'artifacts/v3.0.1-desktop.png'});
   await page.setViewportSize({width:390,height:780});
   const notebook = page.locator('.bcm-notebook');
   await expect(notebook).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   await expect(dock).toHaveCSS('top', '48px');
   expect(await notebook.evaluate(el => el.scrollWidth > el.clientWidth + 1)).toBe(false);
   expect(await notebook.locator('.bcm-notebook-scroll').evaluate(el => el.scrollWidth > el.clientWidth + 1)).toBe(false);
-  await page.screenshot({path:'artifacts/v3.0.0-narrow.png'});
+  await page.screenshot({path:'artifacts/v3.0.1-narrow.png'});
   await notebook.getByRole('button', { name: '设置' }).click();
   const panel = page.locator('.bcm-panel');
   await expect(panel).toHaveCSS('color-scheme', 'light');
   expect(await panel.evaluate(el => el.scrollWidth > el.clientWidth + 1)).toBe(false);
-  await page.screenshot({path:'artifacts/v3.0.0-narrow-settings.png'});
+  await page.screenshot({path:'artifacts/v3.0.1-narrow-settings.png'});
   expect(errors).toEqual([]);
 });
 
@@ -332,7 +405,6 @@ test('custom shortcuts can be recorded, conflict-checked, disabled, persisted an
   await page.reload();
   await expect(page.locator('.bcm-dock')).toBeVisible();
   await page.waitForFunction(() => document.querySelector('video').readyState >= 2);
-  await page.locator('h1').click();
 
   // The overridden capture key and the disabled edit shortcut must do nothing.
   await page.keyboard.press('c');

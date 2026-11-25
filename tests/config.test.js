@@ -6,6 +6,10 @@ import { DEFAULT_SHORTCUTS } from '../src/shortcuts.js';
 const LEGACY_KEY = 'bili_caption_mask_v200_cfg';
 const GLOBAL_KEY = 'bili_caption_mask_v240_global';
 const SERIES_PREFIX = 'bili_caption_mask_v240_series:';
+const V250_KEYS = {
+    capture: 'Alt+S', notebook: 'Alt+B', toggleMask: 'Alt+C', editMask: 'Alt+Z', peek: 'Alt',
+    reveal: 'Space', rateAgain: '1', rateHard: '2', rateGood: '3'
+};
 function memoryStorage(initial = {}) {
     const data = new Map(Object.entries(initial));
     const writes = [];
@@ -146,6 +150,40 @@ test('GM storage takes precedence and writes only one backend', () => {
     assert.equal(localStorage.writes.length, 0);
     assert.deepEqual(gm.writes, [GLOBAL_KEY]);
     assert.equal(store.get('one').blur, 25);
+});
+
+test('saved v2.5 defaults migrate without changing mask preferences or writing on read', () => {
+    const old = { blur: 27, mode: 'solid', singleKeys: true, reviewBatch: 20, shortcuts: V250_KEYS };
+    const localStorage = memoryStorage({ [GLOBAL_KEY]: JSON.stringify(old), [`${SERIES_PREFIX}one`]: JSON.stringify({ top: 30 }) });
+    const store = createConfigStore({ localStorage });
+    const { blur, mode, top, shortcuts } = store.get('one');
+    assert.deepEqual({ blur, mode, top }, { blur: 27, mode: 'solid', top: 30 });
+    assert.deepEqual(shortcuts, DEFAULT_SHORTCUTS);
+    assert.deepEqual(localStorage.writes, []);
+    assert.deepEqual(store.patch('one', { blur: 28 }).shortcuts, DEFAULT_SHORTCUTS);
+    const saved = JSON.parse(localStorage.getItem(GLOBAL_KEY));
+    assert.deepEqual(saved.shortcuts, DEFAULT_SHORTCUTS);
+    assert.equal(Object.hasOwn(saved, 'singleKeys'), false);
+});
+
+test('v2.5 snapshots with customized or disabled bindings preserve their surviving keys', () => {
+    for (const change of [{ capture: 'Ctrl+K', editMask: '' }, { reveal: 'Enter' }]) {
+        const shortcuts = { ...V250_KEYS, ...change };
+        const storage = memoryStorage({ [GLOBAL_KEY]: JSON.stringify({ loopCount: 3, shortcuts }) });
+        const config = createConfigStore({ localStorage: storage }).get('one');
+        assert.deepEqual(config.shortcuts, Object.fromEntries(Object.keys(DEFAULT_SHORTCUTS).map(id => [id, shortcuts[id]])));
+    }
+});
+
+test('v3 keeps explicitly saved Alt+S and Alt+C even with older fallback settings', () => {
+    const shortcuts = { ...DEFAULT_SHORTCUTS, capture: 'Alt+S', toggleMask: 'Alt+C' };
+    const localStorage = memoryStorage({
+        [LEGACY_KEY]: JSON.stringify({ global: { singleKeys: true } }),
+        [GLOBAL_KEY]: JSON.stringify({ blur: 20, shortcuts })
+    });
+    const store = createConfigStore({ localStorage });
+    assert.deepEqual(store.get('one').shortcuts, shortcuts);
+    assert.deepEqual(store.patch('one', { blur: 21 }).shortcuts, shortcuts);
 });
 
 test('a GM read exception can recover local legacy settings but never a competing new local value', () => {

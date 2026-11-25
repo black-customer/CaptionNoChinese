@@ -254,20 +254,37 @@ test('JSON export flushes notes and uses the selected scope and search', async t
 });
 
 test('Markdown groups by series and episode, sorts by time and omits screenshot data', () => {
-    const base = { seriesTitle: 'Friends', epTitle: '第 03 集', createdAt: Date.UTC(2026, 10, 25, 12) };
+    const base = { seriesTitle: 'Friends', epTitle: '第 03 集', createdAt: new Date(2026, 10, 25, 8, 17, 59).getTime() };
     const notes = [
         { ...base, time: 120, userNote: 'later' },
         { ...base, time: 83, userNote: 'thumb through\r\n<script>text</script>', imageUrl: 'data:image/jpeg;base64,/9j/', timestampUrl: 'https://www.bilibili.com/bangumi/play/ep123?t=83' },
         { ...base, epTitle: '第 04 集', time: 2, userNote: 'next episode' },
+        { ...base, time: 97, userNote: '  \r\n  ' },
         { ...base, seriesTitle: 'Other', time: 15 }
     ];
     const markdown = exportMarkdown({ notes, exportedAt: '2026-11-25T12:00:00Z' }, '全部记录');
-    assert.match(markdown, /导出范围：全部记录（共 4 条）/);
+    assert.match(markdown, /导出范围：全部记录（共 5 条）/);
     assert.match(markdown, /## Friends\n\n### 第 03 集\n\n- \*\*01:23\*\* · \[打开原片段\]\(https:\/\/www\.bilibili\.com\/bangumi\/play\/ep123\?t=83\)/);
-    assert.match(markdown, /备注：thumb through\n  > &lt;script>text&lt;\/script>\n  > 记录时间：2026-11-25T12:00:00\.000Z/);
+    assert.match(markdown, /备注：thumb through\n  > &lt;script>text&lt;\/script>\n  > 记录时间：2026-11-25 08:17/);
+    assert.equal(markdown.match(/> 备注：/g).length, 3);
+    assert.match(markdown, /\*\*01:37\*\*\n  > 记录时间：/);
     assert.ok(markdown.indexOf('later') < markdown.indexOf('第 04 集'));
     assert.match(markdown, /\n## Other\n/);
     assert.doesNotMatch(markdown, /base64|<script>/);
+});
+
+test('empty exports for all formats show the same notice without downloading', async t => {
+    const fixture = setup(t, { repo: { exportBackup: async () => ({ exportedAt: '2026-11-25T12:00:00Z', notes: [] }) } });
+    const create = URL.createObjectURL;
+    URL.createObjectURL = () => assert.fail('Empty exports must not create a download URL');
+    t.after(() => { URL.createObjectURL = create; });
+    await fixture.notebook.open();
+    for (const format of ['JSON', 'Markdown', 'HTML']) {
+        const action = byText(fixture.notebook.element, `导出 ${format}`);
+        await action.click();
+        assert.equal(byClass(fixture.notebook.element, 'bcm-notices').children[0].textContent, '当前范围没有可导出的记录。');
+        assert.equal(action.disabled, false);
+    }
 });
 
 test('backup import previews conflicts and waits for explicit confirmation', async t => {

@@ -13,14 +13,14 @@ export function isEditableNode(node) {
     if (!el) return false;
     if (el.isContentEditable) return true;
     const tag = (el.tagName || '').toLowerCase();
-    if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+    if ((tag === 'input' && el.type !== 'range') || tag === 'textarea' || tag === 'select') return true;
     const role = el.getAttribute?.('role') ?? el.attributes?.get?.('role');
     if (role === 'textbox' || role === 'searchbox' || role === 'combobox') return true;
     const ce = el.getAttribute?.('contenteditable') ?? el.attributes?.get?.('contenteditable');
     if (ce != null && ce !== 'false') return true;
     if (tag === 'bili-comment-box' || tag === 'bili-comment-reply-box' || tag === 'bili-comments-box-root' || tag === 'bili-comment-editor') return true;
     if (el.classList?.contains?.('ProseMirror') || el.classList?.contains?.('comment-send-box') || el.classList?.contains?.('reply-box') || el.classList?.contains?.('bili-comment-box')) return true;
-    if (el.closest?.('input,textarea,select,[role="textbox"],[role="searchbox"],[role="combobox"],[contenteditable]:not([contenteditable="false"]),bili-comment-box,bili-comment-reply-box,bili-comments-box-root,.comment-send-box,.reply-box,.bili-comment-box')) return true;
+    if (el.closest?.('input:not([type="range"]),textarea,select,[role="textbox"],[role="searchbox"],[role="combobox"],[contenteditable]:not([contenteditable="false"]),bili-comment-box,bili-comment-reply-box,bili-comments-box-root,.comment-send-box,.reply-box,.bili-comment-box')) return true;
     return false;
 }
 

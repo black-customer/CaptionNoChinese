@@ -4,6 +4,8 @@ const LEGACY_KEY = 'bili_caption_mask_v200_cfg';
 const GLOBAL_KEY = 'bili_caption_mask_v240_global';
 const SERIES_PREFIX = 'bili_caption_mask_v240_series:';
 const SHORTCUT_META = new Map(SHORTCUT_ACTIONS.map(action => [action.id, action]));
+const V250_GLOBAL_SHORTCUTS = { capture: 'Alt+S', notebook: 'Alt+B', toggleMask: 'Alt+C', editMask: 'Alt+Z', peek: 'Alt' };
+const V250_REVIEW_SHORTCUTS = { reveal: 'Space', rateAgain: '1', rateHard: '2', rateGood: '3' };
 const DEFAULTS = Object.freeze({
     enabled: true, left: 15, top: 84, width: 70, height: 7.2,
     blur: 14, mode: 'blur',
@@ -37,6 +39,15 @@ function parse(value) {
         const object = typeof value === 'string' ? JSON.parse(value) : value;
         return isPlain(object) && isSafe(object) ? object : null;
     } catch { return null; }
+}
+
+function usesV250ShortcutDefaults(stored) {
+    const shortcuts = stored?.shortcuts;
+    if (!isPlain(shortcuts)) return false;
+    const review = Object.entries(V250_REVIEW_SHORTCUTS).filter(([id]) => Object.hasOwn(shortcuts, id));
+    const legacy = review.length > 0 || ['singleKeys', 'reviewBatch', 'loopCount'].some(key => Object.hasOwn(stored, key));
+    return legacy && Object.entries(V250_GLOBAL_SHORTCUTS).every(([id, spec]) => shortcuts[id] === spec) &&
+        review.every(([id, spec]) => shortcuts[id] === spec);
 }
 
 function normalize(input) {
@@ -117,7 +128,11 @@ export function createConfigStore(options = {}) {
         const old = legacy();
         const legacyGlobal = isPlain(old.global) ? old.global : {};
         const legacySeries = isPlain(old.series) && Object.hasOwn(old.series, id) && isPlain(old.series[id]) ? old.series[id] : {};
-        const global = onlyGlobal(normalize({ ...legacyGlobal, ...read(GLOBAL_KEY) }));
+        const storedGlobal = read(GLOBAL_KEY);
+        const mergedGlobal = { ...legacyGlobal, ...storedGlobal };
+        // Inspect the saved snapshot before legacy fallback fields can be merged into current data.
+        if (usesV250ShortcutDefaults(storedGlobal)) mergedGlobal.shortcuts = DEFAULT_SHORTCUTS;
+        const global = onlyGlobal(normalize(mergedGlobal));
         const geometry = onlyGeometry(normalize({ ...legacyGlobal, ...legacySeries, ...read(key) }));
         return { ...DEFAULTS, ...global, ...geometry };
     }

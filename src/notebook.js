@@ -13,6 +13,9 @@ const scopeLabels = new Map(SCOPES);
 const scopeCounts = { episode: '本集', series: '本剧', all: '全部' };
 const formatCount = new Intl.NumberFormat('zh-CN');
 const formatDate = new Intl.DateTimeFormat('sv-SE', { year: 'numeric', month: '2-digit', day: '2-digit' });
+const formatDateTime = new Intl.DateTimeFormat('sv-SE', {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
+});
 
 function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -94,14 +97,16 @@ export function exportMarkdown({ notes, exportedAt }, scopeLabel) {
             for (const note of records) {
                 const link = note.timestampUrl ? ` · [打开原片段](${note.timestampUrl})` : '';
                 lines.push(`- **${escapeMarkdown(timeLabel(note).replace(/\s+/g, ' '))}**${link}`);
-                const memo = (note.userNote || '').replace(/\r\n?/g, '\n').split('\n');
-                lines.push(`  > 备注：${escapeMarkdown(memo[0])}`);
-                for (const line of memo.slice(1)) {
-                    const literal = escapeMarkdown(line).replace(/^(\d*)([#>+!.)-])/, '$1\\$2');
-                    lines.push(`  > ${literal}`);
+                if (note.userNote?.trim()) {
+                    const [first, ...rest] = note.userNote.replace(/\r\n?/g, '\n').split('\n');
+                    lines.push(`  > 备注：${escapeMarkdown(first)}`);
+                    for (const line of rest) {
+                        const literal = escapeMarkdown(line).replace(/^(\d*)([#>+!.)-])/, '$1\\$2');
+                        lines.push(`  > ${literal}`);
+                    }
                 }
                 if (note.createdAt > 0 && note.createdAt <= 8.64e15) {
-                    lines.push(`  > 记录时间：${new Date(note.createdAt).toISOString()}`);
+                    lines.push(`  > 记录时间：${formatDateTime.format(note.createdAt)}`);
                 }
             }
         }
@@ -151,7 +156,7 @@ function exportHtml({ notes, exportedAt }, scopeLabel) {
 }
 
 /** Non-modal notebook. The caller owns attachment and fullscreen placement. */
-export function createNotebook({ repo, player, notify = () => {}, version = '3.0.0', onChange = () => {}, onHelp, onSettings }) {
+export function createNotebook({ repo, player, notify = () => {}, version = '3.0.1', onChange = () => {}, onHelp, onSettings }) {
     let opened = false;
     let disposed = false;
     let offset = 0;
@@ -178,7 +183,6 @@ export function createNotebook({ repo, player, notify = () => {}, version = '3.0
     const title = node('h2', 'bcm-notebook-title', '场景记录库');
     const closeButton = button('关闭', () => close(), 'bcm-button-quiet');
     closeButton.setAttribute('aria-label', '关闭记录库');
-    heading.append(title, closeButton);
     const subtitle = node('p', 'bcm-subtitle', '看剧随手记，看完再整理导出。');
     const headerActions = node('div', 'bcm-toolbar');
     for (const [format, extension, mime, serialize] of [
@@ -195,7 +199,7 @@ export function createNotebook({ repo, player, notify = () => {}, version = '3.0
     if (onSettings) utilities.append(button('设置', onSettings, 'bcm-button-quiet'));
     if (onHelp) utilities.append(button('帮助', onHelp, 'bcm-button-quiet'));
     utilities.append(closeButton);
-    heading.append(utilities);
+    heading.append(title, utilities);
     header.append(heading, subtitle, headerActions);
 
     const scroll = node('div', 'bcm-notebook-scroll');
@@ -562,6 +566,10 @@ export function createNotebook({ repo, player, notify = () => {}, version = '3.0
             if (!(await flushDrafts())) throw new Error('请先重试保存备注');
             const data = await repo.exportBackup({ ...filters, query, includeImages: extension !== 'md' });
             if (disposed) return;
+            if (data.notes.length === 0) {
+                setNotice('当前范围没有可导出的记录。');
+                return;
+            }
             const blob = new Blob([serialize(data, scopeLabel)], { type: `${mime};charset=utf-8` });
             downloadBlob(blob, `B站场景记录_${scopeLabel}_${formatDate.format(new Date(data.exportedAt))}.${extension}`);
             setNotice(`已导出 ${data.notes.length} 条记录 · ${format}`);

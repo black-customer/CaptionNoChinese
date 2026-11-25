@@ -3,16 +3,19 @@ import { createPlayerAdapter, formatTime } from './player.js';
 import { createConfigStore } from './config.js';
 import { createNotebook } from './notebook.js';
 import { getDeepActiveElement, isEditableEvent as editable } from './editable.js';
-import { DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS, eventToShortcut, findShortcutConflict, formatShortcut, matchesPeekRelease, matchesShortcut } from './shortcuts.js';
+import { DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS, eventToShortcut, findShortcutConflict, formatShortcut, matchesPeekRelease } from './shortcuts.js';
 import appStyles from './app.css';
 import notebookStyles from './notebook.css';
 
 const VERSION = __APP_VERSION__;
 const clamp = (n, low, high) => Math.max(low, Math.min(high, n));
-const INTERACTIVE = 'button, a[href], summary, [tabindex]:not([tabindex="-1"]), [role="button"], [role="slider"]';
-function isInteractiveShortcut(event) {
-  return getDeepActiveElement()?.closest?.(INTERACTIVE) ||
-    event.composedPath().some(node => node.matches?.(INTERACTIVE));
+const BUTTON_LIKE = 'button, a[href], summary, [role="button"], [role="link"]';
+const SLIDER_LIKE = 'input[type="range"], [role="slider"]';
+const SLIDER_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
+function yieldsToFocusedControl(event, spec) {
+  const selector = spec === 'Space' || spec === 'Enter' ? BUTTON_LIKE : SLIDER_KEYS.has(spec) ? SLIDER_LIKE : null;
+  return selector && (getDeepActiveElement()?.closest?.(selector) ||
+    event.composedPath().some(node => node.matches?.(selector)));
 }
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -47,8 +50,33 @@ function start() {
   const notification = el('div', 'bcm-notification'); notification.hidden = true;
   notification.setAttribute('role', 'status'); notification.setAttribute('aria-live', 'polite');
   root.append(notification);
+  function positionNotification() {
+    if (notification.hidden) return;
+    const viewport = root.getBoundingClientRect();
+    const playerBox = container?.getBoundingClientRect();
+    const inset = 8;
+    if (playerBox && container.isConnected && getComputedStyle(container).visibility === 'visible') {
+      const left = Math.max(playerBox.left, viewport.left);
+      const right = Math.min(playerBox.right, viewport.right);
+      const top = Math.max(playerBox.top, viewport.top);
+      const bottom = Math.min(playerBox.bottom, viewport.bottom);
+      if (right - left > 32 && bottom - top > 32) {
+        notification.style.setProperty('--bcm-toast-max-width', `${right - left - inset * 2}px`);
+        const { width, height } = notification.getBoundingClientRect();
+        const center = clamp(playerBox.left + playerBox.width / 2, left + width / 2 + inset, right - width / 2 - inset);
+        const topLimit = Math.max(top, bottom - height - inset);
+        notification.style.left = `${center - viewport.left}px`;
+        notification.style.top = `${clamp(playerBox.top + 56, top, topLimit) - viewport.top}px`;
+        return;
+      }
+    }
+    notification.style.removeProperty('--bcm-toast-max-width');
+    notification.style.removeProperty('left');
+    notification.style.removeProperty('top');
+  }
   function notify(message, { kind = 'info', duration = kind === 'error' ? 7000 : 3000 } = {}) {
     notification.textContent = message; notification.dataset.kind = kind; notification.hidden = false;
+    positionNotification();
     notification.getAnimations().forEach(animation => animation.cancel());
     if (duration === 1600 && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       notification.animate([{ opacity: 1, offset: 0 }, { opacity: 1, offset: .88 }, { opacity: 0 }], duration);
@@ -216,6 +244,7 @@ function start() {
   }
   function paint() {
     frame = null;
+    positionNotification();
     if (!mask || !snapshot || !config) return;
     const rect = player.getVideoRect(); if (!rect) return;
     Object.assign(mask.style, {
@@ -389,19 +418,21 @@ function start() {
       else if (edit) { edit = false; cancelDrag(); paint(); }
       return;
     }
-    if (!snapshot || !panel.hidden || editable(event) || isInteractiveShortcut(event) || event.isComposing) return;
+    if (!snapshot || !panel.hidden || editable(event) || event.isComposing) return;
+    const spec = eventToShortcut(event, { allowModifierOnly: true });
+    if (!spec || yieldsToFocusedControl(event, spec)) return;
     const shortcuts = config.shortcuts || DEFAULT_SHORTCUTS;
-    if (shortcuts.peek && matchesShortcut(event, shortcuts.peek, { allowModifierOnly: true })) {
+    if (spec === shortcuts.peek) {
       if (!peek) { peek = true; paint(); }
       if (!['Alt', 'Shift', 'Ctrl'].includes(shortcuts.peek)) { event.preventDefault(); event.stopImmediatePropagation(); }
       return;
     }
     if (event.repeat) return;
     let action;
-    if (matchesShortcut(event, shortcuts.capture)) action = capture;
-    else if (matchesShortcut(event, shortcuts.notebook)) action = () => notebook.toggle().catch(fail);
-    else if (matchesShortcut(event, shortcuts.toggleMask)) action = toggleMask;
-    else if (matchesShortcut(event, shortcuts.editMask)) action = toggleEdit;
+    if (spec === shortcuts.capture) action = capture;
+    else if (spec === shortcuts.notebook) action = () => notebook.toggle().catch(fail);
+    else if (spec === shortcuts.toggleMask) action = toggleMask;
+    else if (spec === shortcuts.editMask) action = toggleEdit;
     if (action) {
       event.preventDefault(); event.stopImmediatePropagation();
       try { action(); } catch (error) { fail(error); }
@@ -414,6 +445,9 @@ function start() {
   window.addEventListener('blur', () => { peek = false; cancelDrag(); paint(); }, { signal: events.signal });
   document.addEventListener('fullscreenchange', fullscreen, { signal: events.signal });
   window.addEventListener('resize', schedulePaint, { passive: true, signal: events.signal });
+  window.addEventListener('scroll', () => {
+    if (!notification.hidden) schedulePaint();
+  }, { capture: true, passive: true, signal: events.signal });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && snapshot) {
       config = settings.get(configSeries); peek = false; paint(); updateCount();

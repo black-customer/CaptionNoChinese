@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 剧集双语字幕羽化遮罩与生词本 (看剧学英语)
 // @namespace    https://github.com/CaptionNoChinese
-// @version      3.0.0
+// @version      3.0.1
 // @description  中文字幕遮罩、单键静默记录、按集整理备注，以及 JSON、Markdown 和 HTML 导出。
 // @author       black-customer
 // @homepageURL  https://github.com/black-customer/CaptionNoChinese
@@ -1502,11 +1502,6 @@
     if (event.metaKey) mods.push("Meta");
     return mods.length ? `${mods.join("+")}+${token}` : token;
   }
-  function matchesShortcut(event, spec, { allowModifierOnly = false } = {}) {
-    if (!spec) return false;
-    const actual = eventToShortcut(event, { allowModifierOnly });
-    return actual !== null && actual === spec;
-  }
   function matchesPeekRelease(event, spec) {
     if (!spec) return false;
     const token = keyTokenFromEvent(event);
@@ -1537,6 +1532,8 @@
   var GLOBAL_KEY = "bili_caption_mask_v240_global";
   var SERIES_PREFIX = "bili_caption_mask_v240_series:";
   var SHORTCUT_META = new Map(SHORTCUT_ACTIONS.map((action) => [action.id, action]));
+  var V250_GLOBAL_SHORTCUTS = { capture: "Alt+S", notebook: "Alt+B", toggleMask: "Alt+C", editMask: "Alt+Z", peek: "Alt" };
+  var V250_REVIEW_SHORTCUTS = { reveal: "Space", rateAgain: "1", rateHard: "2", rateGood: "3" };
   var DEFAULTS = Object.freeze({
     enabled: true,
     left: 15,
@@ -1576,6 +1573,13 @@
     } catch {
       return null;
     }
+  }
+  function usesV250ShortcutDefaults(stored) {
+    const shortcuts = stored?.shortcuts;
+    if (!isPlain(shortcuts)) return false;
+    const review = Object.entries(V250_REVIEW_SHORTCUTS).filter(([id]) => Object.hasOwn(shortcuts, id));
+    const legacy = review.length > 0 || ["singleKeys", "reviewBatch", "loopCount"].some((key) => Object.hasOwn(stored, key));
+    return legacy && Object.entries(V250_GLOBAL_SHORTCUTS).every(([id, spec]) => shortcuts[id] === spec) && review.every(([id, spec]) => shortcuts[id] === spec);
   }
   function normalize(input) {
     const output = { ...DEFAULTS, shortcuts: { ...DEFAULT_SHORTCUTS } };
@@ -1657,7 +1661,10 @@
       const old = legacy();
       const legacyGlobal = isPlain(old.global) ? old.global : {};
       const legacySeries = isPlain(old.series) && Object.hasOwn(old.series, id) && isPlain(old.series[id]) ? old.series[id] : {};
-      const global = onlyGlobal(normalize({ ...legacyGlobal, ...read(GLOBAL_KEY) }));
+      const storedGlobal = read(GLOBAL_KEY);
+      const mergedGlobal = { ...legacyGlobal, ...storedGlobal };
+      if (usesV250ShortcutDefaults(storedGlobal)) mergedGlobal.shortcuts = DEFAULT_SHORTCUTS;
+      const global = onlyGlobal(normalize(mergedGlobal));
       const geometry = onlyGeometry(normalize({ ...legacyGlobal, ...legacySeries, ...read(key) }));
       return { ...DEFAULTS, ...global, ...geometry };
     }
@@ -1745,14 +1752,14 @@
     if (!el2) return false;
     if (el2.isContentEditable) return true;
     const tag = (el2.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+    if (tag === "input" && el2.type !== "range" || tag === "textarea" || tag === "select") return true;
     const role = el2.getAttribute?.("role") ?? el2.attributes?.get?.("role");
     if (role === "textbox" || role === "searchbox" || role === "combobox") return true;
     const ce = el2.getAttribute?.("contenteditable") ?? el2.attributes?.get?.("contenteditable");
     if (ce != null && ce !== "false") return true;
     if (tag === "bili-comment-box" || tag === "bili-comment-reply-box" || tag === "bili-comments-box-root" || tag === "bili-comment-editor") return true;
     if (el2.classList?.contains?.("ProseMirror") || el2.classList?.contains?.("comment-send-box") || el2.classList?.contains?.("reply-box") || el2.classList?.contains?.("bili-comment-box")) return true;
-    if (el2.closest?.('input,textarea,select,[role="textbox"],[role="searchbox"],[role="combobox"],[contenteditable]:not([contenteditable="false"]),bili-comment-box,bili-comment-reply-box,bili-comments-box-root,.comment-send-box,.reply-box,.bili-comment-box')) return true;
+    if (el2.closest?.('input:not([type="range"]),textarea,select,[role="textbox"],[role="searchbox"],[role="combobox"],[contenteditable]:not([contenteditable="false"]),bili-comment-box,bili-comment-reply-box,bili-comments-box-root,.comment-send-box,.reply-box,.bili-comment-box')) return true;
     return false;
   }
   function isEditableEvent(targetOrEvent, doc = typeof document !== "undefined" ? document : null) {
@@ -1788,6 +1795,14 @@
   var scopeCounts = { episode: "本集", series: "本剧", all: "全部" };
   var formatCount = new Intl.NumberFormat("zh-CN");
   var formatDate = new Intl.DateTimeFormat("sv-SE", { year: "numeric", month: "2-digit", day: "2-digit" });
+  var formatDateTime = new Intl.DateTimeFormat("sv-SE", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
   function node(tag, className, text2) {
     const element = document.createElement(tag);
     if (className) element.className = className;
@@ -1861,14 +1876,16 @@
         for (const note of records) {
           const link = note.timestampUrl ? ` · [打开原片段](${note.timestampUrl})` : "";
           lines.push(`- **${escapeMarkdown(timeLabel(note).replace(/\s+/g, " "))}**${link}`);
-          const memo = (note.userNote || "").replace(/\r\n?/g, "\n").split("\n");
-          lines.push(`  > 备注：${escapeMarkdown(memo[0])}`);
-          for (const line of memo.slice(1)) {
-            const literal = escapeMarkdown(line).replace(/^(\d*)([#>+!.)-])/, "$1\\$2");
-            lines.push(`  > ${literal}`);
+          if (note.userNote?.trim()) {
+            const [first, ...rest] = note.userNote.replace(/\r\n?/g, "\n").split("\n");
+            lines.push(`  > 备注：${escapeMarkdown(first)}`);
+            for (const line of rest) {
+              const literal = escapeMarkdown(line).replace(/^(\d*)([#>+!.)-])/, "$1\\$2");
+              lines.push(`  > ${literal}`);
+            }
           }
           if (note.createdAt > 0 && note.createdAt <= 864e13) {
-            lines.push(`  > 记录时间：${new Date(note.createdAt).toISOString()}`);
+            lines.push(`  > 记录时间：${formatDateTime.format(note.createdAt)}`);
           }
         }
       }
@@ -1916,7 +1933,7 @@
     return "<!doctype html>\n" + output.documentElement.outerHTML;
   }
   function createNotebook({ repo, player, notify = () => {
-  }, version = "3.0.0", onChange = () => {
+  }, version = "3.0.1", onChange = () => {
   }, onHelp, onSettings }) {
     let opened = false;
     let disposed = false;
@@ -1943,7 +1960,6 @@
     const title = node("h2", "bcm-notebook-title", "场景记录库");
     const closeButton = button("关闭", () => close(), "bcm-button-quiet");
     closeButton.setAttribute("aria-label", "关闭记录库");
-    heading.append(title, closeButton);
     const subtitle = node("p", "bcm-subtitle", "看剧随手记，看完再整理导出。");
     const headerActions = node("div", "bcm-toolbar");
     for (const [format, extension, mime, serialize] of [
@@ -1960,7 +1976,7 @@
     if (onSettings) utilities.append(button("设置", onSettings, "bcm-button-quiet"));
     if (onHelp) utilities.append(button("帮助", onHelp, "bcm-button-quiet"));
     utilities.append(closeButton);
-    heading.append(utilities);
+    heading.append(title, utilities);
     header.append(heading, subtitle, headerActions);
     const scroll = node("div", "bcm-notebook-scroll");
     const filters = node("section", "bcm-filters");
@@ -2331,6 +2347,10 @@
         if (!await flushDrafts()) throw new Error("请先重试保存备注");
         const data = await repo.exportBackup({ ...filters2, query, includeImages: extension !== "md" });
         if (disposed) return;
+        if (data.notes.length === 0) {
+          setNotice("当前范围没有可导出的记录。");
+          return;
+        }
         const blob = new Blob([serialize(data, scopeLabel)], { type: `${mime};charset=utf-8` });
         downloadBlob(blob, `B站场景记录_${scopeLabel}_${formatDate.format(new Date(data.exportedAt))}.${extension}`);
         setNotice(`已导出 ${data.notes.length} 条记录 · ${format}`);
@@ -2452,17 +2472,20 @@
   }
 
   // src/app.css
-  var app_default = '.bcm-root, .bcm-theme {\n  --bcm-bg: #ffffff;\n  --bcm-subtle: #f7f8fa;\n  --bcm-hover: #f0f2f5;\n  --bcm-line: #e5e7eb;\n  --bcm-line-strong: #d1d5db;\n  --bcm-text: #111827;\n  --bcm-muted: #6b7280;\n  --bcm-primary: #18181b;\n  --bcm-primary-hover: #27272a;\n  --bcm-primary-ink: #ffffff;\n  --bcm-focus: #2563eb;\n  --bcm-danger: #b91c1c;\n  --bcm-danger-bg: #fef2f2;\n  --bcm-shadow: 0 12px 32px rgb(15 23 42 / 10%), 0 2px 6px rgb(15 23 42 / 5%);\n  --bcm-dock-right: 176px;\n  color-scheme: light;\n}\n\n.bcm-root {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483000;\n  pointer-events: none;\n  color: var(--bcm-text);\n  font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif;\n  text-align: start;\n}\n\n.bcm-root [hidden], .bcm-dock[hidden], .bcm-mask[hidden] { display: none !important; }\n.bcm-root *, .bcm-dock, .bcm-dock *, .bcm-mask * { box-sizing: border-box; }\n.bcm-root :focus-visible, .bcm-theme :focus-visible { outline: 2px solid var(--bcm-focus); outline-offset: 2px; }\n.bcm-root button, .bcm-root input, .bcm-root select, .bcm-root textarea, .bcm-theme button { font: inherit; }\n.bcm-root ::selection { background: #dbeafe; color: var(--bcm-text); }\n.bcm-root button:disabled { opacity: .55; cursor: default; }\n.bcm-root .bcm-notebook { z-index: 10; }\n.bcm-root .bcm-panel { z-index: 20; }\n.bcm-root .bcm-notification { z-index: 30; }\n\n.bcm-mask {\n  position: absolute !important;\n  z-index: 25 !important;\n  box-sizing: border-box !important;\n  user-select: none;\n  touch-action: none;\n  cursor: pointer;\n  pointer-events: auto;\n  background: transparent;\n  backdrop-filter: blur(var(--bcm-blur, 14px));\n  -webkit-backdrop-filter: blur(var(--bcm-blur, 14px));\n  mask-image: linear-gradient(to right, transparent, #000 5%, #000 95%, transparent),\n    linear-gradient(to bottom, transparent, #000 16%, #000 84%, transparent);\n  mask-composite: intersect;\n  -webkit-mask-image: linear-gradient(to right, transparent, #000 5%, #000 95%, transparent),\n    linear-gradient(to bottom, transparent, #000 16%, #000 84%, transparent);\n  -webkit-mask-composite: source-in;\n}\n\n.bcm-mask.bcm-solid { background: var(--bcm-primary); backdrop-filter: none; -webkit-backdrop-filter: none; }\n.bcm-mask:not(.bcm-edit):not(.bcm-wheeling):hover, .bcm-mask.bcm-peek:not(.bcm-edit):not(.bcm-wheeling) {\n  background: transparent;\n  backdrop-filter: none;\n  -webkit-backdrop-filter: none;\n  mask-image: none;\n  -webkit-mask-image: none;\n}\n\n.bcm-mask.bcm-edit, .bcm-mask.bcm-wheeling {\n  mask-image: none;\n  -webkit-mask-image: none;\n  outline: 1.5px solid var(--bcm-focus);\n  background: rgb(255 255 255 / 18%);\n  backdrop-filter: blur(3px);\n  cursor: move;\n}\n\n.bcm-mask .bcm-mask-tools {\n  position: absolute;\n  bottom: calc(100% + 8px);\n  right: 0;\n  display: none;\n  align-items: center;\n  gap: 8px;\n  width: max-content;\n  padding: 4px 6px 4px 10px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 8px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: var(--bcm-shadow);\n  font: 12px/1.5 system-ui, "Microsoft YaHei", sans-serif;\n}\n\n.bcm-mask.bcm-edit .bcm-mask-tools { display: flex; }\n.bcm-mask-tools button, .bcm-dock button {\n  appearance: none;\n  margin: 0;\n  min-height: 30px;\n  padding: 5px 8px;\n  border: 0;\n  border-radius: 5px;\n  background: transparent;\n  color: inherit;\n  white-space: nowrap;\n  cursor: pointer;\n}\n.bcm-mask-tools button { background: var(--bcm-subtle); }\n.bcm-dock button:hover, .bcm-mask-tools button:hover, .bcm-dock button[aria-pressed="true"] { background: var(--bcm-hover); }\n.bcm-handle {\n  display: none;\n  position: absolute;\n  width: 12px;\n  height: 12px;\n  background: var(--bcm-bg);\n  border: 1px solid var(--bcm-primary);\n  border-radius: 4px;\n}\n.bcm-edit .bcm-handle { display: block; }\n.bcm-handle[data-handle="n"] { top: -6px; left: calc(50% - 6px); cursor: ns-resize; }\n.bcm-handle[data-handle="s"] { bottom: -6px; left: calc(50% - 6px); cursor: ns-resize; }\n.bcm-handle[data-handle="e"] { right: -6px; top: calc(50% - 6px); cursor: ew-resize; }\n.bcm-handle[data-handle="w"] { left: -6px; top: calc(50% - 6px); cursor: ew-resize; }\n.bcm-handle[data-handle="nw"] { top: -6px; left: -6px; cursor: nwse-resize; }\n.bcm-handle[data-handle="ne"] { top: -6px; right: -6px; cursor: nesw-resize; }\n.bcm-handle[data-handle="sw"] { bottom: -6px; left: -6px; cursor: nesw-resize; }\n.bcm-handle[data-handle="se"] { bottom: -6px; right: -6px; cursor: nwse-resize; }\n\n.bcm-dock {\n  position: absolute;\n  top: 12px;\n  right: var(--bcm-dock-right, 176px);\n  z-index: 100;\n  display: flex;\n  flex-wrap: nowrap;\n  align-items: center;\n  gap: 2px;\n  max-width: calc(100% - 24px);\n  padding: 4px 6px;\n  border: 1px solid rgb(15 23 42 / 8%);\n  border-radius: 10px;\n  background: rgb(255 255 255 / 92%);\n  color: var(--bcm-primary);\n  backdrop-filter: blur(12px);\n  box-shadow: 0 4px 14px rgb(15 23 42 / 10%);\n  font: 12px/1.4 system-ui, "Microsoft YaHei", sans-serif;\n  font-variant-numeric: tabular-nums;\n  transition: opacity .2s ease;\n  pointer-events: auto;\n}\n.bcm-dock.bcm-idle:not(:hover):not(:focus-within) { opacity: 0; pointer-events: none; }\n.bcm-dock .bcm-version-button { color: var(--bcm-muted); }\n\n.bcm-notification {\n  position: absolute;\n  top: 16px;\n  left: 50%;\n  transform: translateX(-50%);\n  max-width: min(620px, calc(100% - 32px));\n  padding: 8px 14px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 20px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: var(--bcm-shadow);\n  overflow-wrap: anywhere;\n  pointer-events: none;\n}\n.bcm-notification[data-kind="success"] { font-size: 13px; font-variant-numeric: tabular-nums; }\n.bcm-notification[data-kind="error"] { color: var(--bcm-danger); }\n\n.bcm-panel {\n  position: absolute;\n  top: 14px;\n  right: 14px;\n  width: min(414px, calc(100% - 28px));\n  max-height: calc(100% - 28px);\n  overflow: auto;\n  overscroll-behavior: contain;\n  padding: 22px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 14px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: var(--bcm-shadow);\n  pointer-events: auto;\n}\n.bcm-panel h2 { margin: 0 0 8px; font-size: 21px; font-weight: 700; }\n.bcm-panel p { margin: 8px 0 16px; color: var(--bcm-muted); }\n.bcm-panel form > label {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(0, 142px);\n  align-items: center;\n  gap: 8px;\n  margin: 10px 0;\n}\n.bcm-panel input, .bcm-panel select {\n  width: 100%;\n  min-width: 0;\n  min-height: 36px;\n  margin: 0;\n  padding: 6px 8px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 6px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n}\n.bcm-panel button {\n  min-height: 34px;\n  margin: 0;\n  padding: 6px 11px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 6px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  cursor: pointer;\n}\n.bcm-panel button:hover { background: var(--bcm-hover); }\n.bcm-panel .bcm-primary {\n  border-color: var(--bcm-primary);\n  background: var(--bcm-primary);\n  color: var(--bcm-primary-ink);\n}\n.bcm-panel .bcm-primary:hover { background: var(--bcm-primary-hover); }\n.bcm-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }\n\n.bcm-shortcut-section {\n  min-width: 0;\n  margin: 20px 0 0;\n  padding: 12px 0 0;\n  border: 0;\n  border-top: 1px solid var(--bcm-line);\n}\n.bcm-shortcut-section legend { padding: 0 8px 0 0; font-size: 15px; font-weight: 650; }\n.bcm-shortcut-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }\n.bcm-panel .bcm-shortcut-hint { margin: 0; font-size: 12px; }\n.bcm-panel .bcm-shortcut-reset, .bcm-panel .bcm-shortcut-clear { padding-inline: 8px; font-size: 12px; }\n.bcm-shortcut-row {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(0, 176px);\n  align-items: center;\n  gap: 8px;\n  margin: 8px 0;\n}\n.bcm-shortcut-label { font-size: 13px; overflow-wrap: anywhere; }\n.bcm-shortcut-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }\n.bcm-panel .bcm-shortcut-input, .bcm-panel kbd {\n  background: var(--bcm-subtle);\n  font: 12px/1.5 ui-monospace, Consolas, "Microsoft YaHei", monospace;\n  text-align: center;\n}\n.bcm-panel .bcm-shortcut-input { cursor: pointer; }\n.bcm-panel .bcm-shortcut-input[data-recording="true"] { border-color: var(--bcm-focus); background: var(--bcm-bg); }\n.bcm-panel kbd { display: inline-block; padding: 2px 6px; border: 1px solid var(--bcm-line); border-radius: 4px; }\n.bcm-panel dl {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);\n  align-items: baseline;\n  gap: 10px 8px;\n  margin: 12px 0 16px;\n  padding: 12px 0;\n  border-block: 1px solid var(--bcm-line);\n}\n.bcm-panel dt { font-weight: 600; }\n.bcm-panel dd { margin: 0; color: var(--bcm-muted); }\n\n@media (max-width: 640px) {\n  .bcm-dock { top: 48px; right: 12px; flex-wrap: wrap; }\n}\n@media (max-width: 440px) {\n  .bcm-panel { padding: 16px; }\n  .bcm-shortcut-row { grid-template-columns: minmax(0, 1fr) minmax(0, 55%); }\n}\n@media (prefers-reduced-motion: reduce) { .bcm-dock { transition: none; } }\n';
+  var app_default = '.bcm-root, .bcm-theme {\n  --bcm-bg: #ffffff;\n  --bcm-subtle: #f7f8fa;\n  --bcm-hover: #f0f2f5;\n  --bcm-line: #e5e7eb;\n  --bcm-line-strong: #d1d5db;\n  --bcm-text: #111827;\n  --bcm-muted: #6b7280;\n  --bcm-primary: #18181b;\n  --bcm-primary-hover: #27272a;\n  --bcm-primary-ink: #ffffff;\n  --bcm-focus: #2563eb;\n  --bcm-danger: #b91c1c;\n  --bcm-danger-bg: #fef2f2;\n  --bcm-shadow: 0 12px 32px rgb(15 23 42 / 10%), 0 2px 6px rgb(15 23 42 / 5%);\n  --bcm-dock-right: 176px;\n  color-scheme: light;\n}\n\n.bcm-root {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483000;\n  pointer-events: none;\n  color: var(--bcm-text);\n  font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif;\n  text-align: start;\n}\n\n.bcm-root [hidden], .bcm-dock[hidden], .bcm-mask[hidden] { display: none !important; }\n.bcm-root *, .bcm-dock, .bcm-dock *, .bcm-mask * { box-sizing: border-box; }\n.bcm-root :focus-visible, .bcm-theme :focus-visible { outline: 2px solid var(--bcm-focus); outline-offset: 2px; }\n.bcm-root button, .bcm-root input, .bcm-root select, .bcm-root textarea, .bcm-theme button { font: inherit; }\n.bcm-root ::selection { background: #dbeafe; color: var(--bcm-text); }\n.bcm-root button:disabled { opacity: .55; cursor: default; }\n.bcm-root .bcm-notebook { z-index: 10; }\n.bcm-root .bcm-panel { z-index: 20; }\n.bcm-root .bcm-notification { z-index: 30; }\n\n.bcm-mask {\n  position: absolute !important;\n  z-index: 25 !important;\n  box-sizing: border-box !important;\n  user-select: none;\n  touch-action: none;\n  cursor: pointer;\n  pointer-events: auto;\n  background: transparent;\n  backdrop-filter: blur(var(--bcm-blur, 14px));\n  -webkit-backdrop-filter: blur(var(--bcm-blur, 14px));\n  mask-image: linear-gradient(to right, transparent, #000 5%, #000 95%, transparent),\n    linear-gradient(to bottom, transparent, #000 16%, #000 84%, transparent);\n  mask-composite: intersect;\n  -webkit-mask-image: linear-gradient(to right, transparent, #000 5%, #000 95%, transparent),\n    linear-gradient(to bottom, transparent, #000 16%, #000 84%, transparent);\n  -webkit-mask-composite: source-in;\n}\n\n.bcm-mask.bcm-solid { background: var(--bcm-primary); backdrop-filter: none; -webkit-backdrop-filter: none; }\n.bcm-mask:not(.bcm-edit):not(.bcm-wheeling):hover, .bcm-mask.bcm-peek:not(.bcm-edit):not(.bcm-wheeling) {\n  background: transparent;\n  backdrop-filter: none;\n  -webkit-backdrop-filter: none;\n  mask-image: none;\n  -webkit-mask-image: none;\n}\n\n.bcm-mask.bcm-edit, .bcm-mask.bcm-wheeling {\n  mask-image: none;\n  -webkit-mask-image: none;\n  outline: 1.5px solid var(--bcm-focus);\n  background: rgb(255 255 255 / 18%);\n  backdrop-filter: blur(3px);\n  cursor: move;\n}\n\n.bcm-mask .bcm-mask-tools {\n  position: absolute;\n  bottom: calc(100% + 8px);\n  right: 0;\n  display: none;\n  align-items: center;\n  gap: 8px;\n  width: max-content;\n  padding: 4px 6px 4px 10px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 8px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: var(--bcm-shadow);\n  font: 12px/1.5 system-ui, "Microsoft YaHei", sans-serif;\n}\n\n.bcm-mask.bcm-edit .bcm-mask-tools { display: flex; }\n.bcm-mask-tools button, .bcm-dock button {\n  appearance: none;\n  margin: 0;\n  min-height: 30px;\n  padding: 5px 8px;\n  border: 0;\n  border-radius: 5px;\n  background: transparent;\n  color: inherit;\n  white-space: nowrap;\n  cursor: pointer;\n}\n.bcm-mask-tools button { background: var(--bcm-subtle); }\n.bcm-dock button:hover, .bcm-mask-tools button:hover, .bcm-dock button[aria-pressed="true"] { background: var(--bcm-hover); }\n.bcm-handle {\n  display: none;\n  position: absolute;\n  width: 12px;\n  height: 12px;\n  background: var(--bcm-bg);\n  border: 1px solid var(--bcm-primary);\n  border-radius: 4px;\n}\n.bcm-edit .bcm-handle { display: block; }\n.bcm-handle[data-handle="n"] { top: -6px; left: calc(50% - 6px); cursor: ns-resize; }\n.bcm-handle[data-handle="s"] { bottom: -6px; left: calc(50% - 6px); cursor: ns-resize; }\n.bcm-handle[data-handle="e"] { right: -6px; top: calc(50% - 6px); cursor: ew-resize; }\n.bcm-handle[data-handle="w"] { left: -6px; top: calc(50% - 6px); cursor: ew-resize; }\n.bcm-handle[data-handle="nw"] { top: -6px; left: -6px; cursor: nwse-resize; }\n.bcm-handle[data-handle="ne"] { top: -6px; right: -6px; cursor: nesw-resize; }\n.bcm-handle[data-handle="sw"] { bottom: -6px; left: -6px; cursor: nesw-resize; }\n.bcm-handle[data-handle="se"] { bottom: -6px; right: -6px; cursor: nwse-resize; }\n\n.bcm-dock {\n  position: absolute;\n  top: 12px;\n  right: var(--bcm-dock-right, 176px);\n  z-index: 100;\n  display: flex;\n  flex-wrap: nowrap;\n  align-items: center;\n  gap: 2px;\n  max-width: calc(100% - 24px);\n  padding: 4px 6px;\n  border: 1px solid rgb(15 23 42 / 8%);\n  border-radius: 10px;\n  background: rgb(255 255 255 / 92%);\n  color: var(--bcm-primary);\n  backdrop-filter: blur(12px);\n  box-shadow: 0 4px 14px rgb(15 23 42 / 10%);\n  font: 12px/1.4 system-ui, "Microsoft YaHei", sans-serif;\n  font-variant-numeric: tabular-nums;\n  transition: opacity .2s ease;\n  pointer-events: auto;\n}\n.bcm-dock.bcm-idle:not(:hover):not(:focus-within) { opacity: 0; pointer-events: none; }\n.bcm-dock .bcm-version-button { color: var(--bcm-muted); }\n\n.bcm-notification {\n  position: absolute;\n  top: 16px;\n  left: 50%;\n  transform: translateX(-50%);\n  width: max-content;\n  max-width: min(620px, var(--bcm-toast-max-width, calc(100% - 32px)));\n  padding: 8px 14px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 20px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: var(--bcm-shadow);\n  overflow-wrap: anywhere;\n  pointer-events: none;\n}\n.bcm-notification[data-kind="success"] { font-size: 13px; font-variant-numeric: tabular-nums; }\n.bcm-notification[data-kind="error"] { color: var(--bcm-danger); }\n\n.bcm-panel {\n  position: absolute;\n  top: 14px;\n  right: 14px;\n  width: min(414px, calc(100% - 28px));\n  max-height: calc(100% - 28px);\n  overflow: auto;\n  overscroll-behavior: contain;\n  padding: 22px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 14px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: var(--bcm-shadow);\n  pointer-events: auto;\n}\n.bcm-panel h2 { margin: 0 0 8px; font-size: 21px; font-weight: 700; }\n.bcm-panel p { margin: 8px 0 16px; color: var(--bcm-muted); }\n.bcm-panel form > label {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(0, 142px);\n  align-items: center;\n  gap: 8px;\n  margin: 10px 0;\n}\n.bcm-panel input, .bcm-panel select {\n  width: 100%;\n  min-width: 0;\n  min-height: 36px;\n  margin: 0;\n  padding: 6px 8px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 6px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n}\n.bcm-panel button {\n  min-height: 34px;\n  margin: 0;\n  padding: 6px 11px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 6px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  cursor: pointer;\n}\n.bcm-panel button:hover { background: var(--bcm-hover); }\n.bcm-panel .bcm-primary {\n  border-color: var(--bcm-primary);\n  background: var(--bcm-primary);\n  color: var(--bcm-primary-ink);\n}\n.bcm-panel .bcm-primary:hover { background: var(--bcm-primary-hover); }\n.bcm-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }\n\n.bcm-shortcut-section {\n  min-width: 0;\n  margin: 20px 0 0;\n  padding: 12px 0 0;\n  border: 0;\n  border-top: 1px solid var(--bcm-line);\n}\n.bcm-shortcut-section legend { padding: 0 8px 0 0; font-size: 15px; font-weight: 650; }\n.bcm-shortcut-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }\n.bcm-panel .bcm-shortcut-hint { margin: 0; font-size: 12px; }\n.bcm-panel .bcm-shortcut-reset, .bcm-panel .bcm-shortcut-clear { padding-inline: 8px; font-size: 12px; }\n.bcm-shortcut-row {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(0, 176px);\n  align-items: center;\n  gap: 8px;\n  margin: 8px 0;\n}\n.bcm-shortcut-label { font-size: 13px; overflow-wrap: anywhere; }\n.bcm-shortcut-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }\n.bcm-panel .bcm-shortcut-input, .bcm-panel kbd {\n  background: var(--bcm-subtle);\n  font: 12px/1.5 ui-monospace, Consolas, "Microsoft YaHei", monospace;\n  text-align: center;\n}\n.bcm-panel .bcm-shortcut-input { cursor: pointer; }\n.bcm-panel .bcm-shortcut-input[data-recording="true"] { border-color: var(--bcm-focus); background: var(--bcm-bg); }\n.bcm-panel kbd { display: inline-block; padding: 2px 6px; border: 1px solid var(--bcm-line); border-radius: 4px; }\n.bcm-panel dl {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);\n  align-items: baseline;\n  gap: 10px 8px;\n  margin: 12px 0 16px;\n  padding: 12px 0;\n  border-block: 1px solid var(--bcm-line);\n}\n.bcm-panel dt { font-weight: 600; }\n.bcm-panel dd { margin: 0; color: var(--bcm-muted); }\n\n@media (max-width: 640px) {\n  .bcm-dock { top: 48px; right: 12px; flex-wrap: wrap; }\n}\n@media (max-width: 440px) {\n  .bcm-panel { padding: 16px; }\n  .bcm-shortcut-row { grid-template-columns: minmax(0, 1fr) minmax(0, 55%); }\n}\n@media (prefers-reduced-motion: reduce) { .bcm-dock { transition: none; } }\n';
 
   // src/notebook.css
   var notebook_default = ".bcm-notebook {\n  position: absolute;\n  inset-block: 0;\n  inset-inline-end: 0;\n  display: flex;\n  flex-direction: column;\n  box-sizing: border-box;\n  width: min(432px, 100%);\n  overflow: hidden;\n  border-inline-start: 1px solid var(--bcm-line);\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: -12px 0 32px rgb(15 23 42 / 10%);\n  pointer-events: auto;\n}\n.bcm-notebook:focus { outline: none; }\n.bcm-notebook h2, .bcm-notebook h3, .bcm-notebook p { margin: 0; padding: 0; }\n.bcm-notebook-header {\n  flex: none;\n  padding: 18px 18px 16px;\n  border-block-end: 1px solid var(--bcm-line);\n  background: var(--bcm-bg);\n}\n.bcm-heading-row, .bcm-header-tools, .bcm-toolbar {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 6px;\n}\n.bcm-notebook .bcm-notebook-title {\n  margin-inline-end: auto;\n  font-size: 21px;\n  line-height: 1.3;\n  font-weight: 700;\n}\n.bcm-notebook .bcm-subtitle { margin-block: 4px 14px; color: var(--bcm-muted); }\n.bcm-notebook .bcm-button {\n  appearance: none;\n  min-height: 34px;\n  max-width: 100%;\n  margin: 0;\n  padding: 6px 8px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 6px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  font-size: 13px;\n  line-height: 1.35;\n  text-align: center;\n  overflow-wrap: anywhere;\n  cursor: pointer;\n  touch-action: manipulation;\n}\n.bcm-notebook .bcm-button:hover:not(:disabled) { background: var(--bcm-hover); }\n.bcm-notebook .bcm-button-primary {\n  border-color: var(--bcm-primary);\n  background: var(--bcm-primary);\n  color: var(--bcm-primary-ink);\n  font-weight: 600;\n}\n.bcm-notebook .bcm-button-primary:hover:not(:disabled) { background: var(--bcm-primary-hover); }\n.bcm-notebook .bcm-button-quiet { background: transparent; border-color: transparent; }\n.bcm-notebook .bcm-delete { color: var(--bcm-muted); }\n.bcm-notebook .bcm-delete:hover:not(:disabled) { color: var(--bcm-danger); background: var(--bcm-danger-bg); }\n\n.bcm-notebook-scroll {\n  flex: 1;\n  min-height: 0;\n  overflow: auto;\n  overscroll-behavior: contain;\n  scrollbar-color: var(--bcm-line-strong) var(--bcm-bg);\n  scrollbar-width: thin;\n}\n.bcm-filters { display: grid; gap: 8px; padding: 16px 18px 12px; }\n.bcm-field { display: grid; gap: 6px; min-width: 0; }\n.bcm-label { color: var(--bcm-muted); font-size: 12px; line-height: 1.4; }\n.bcm-filter-row { display: grid; grid-template-columns: minmax(0, 132px) minmax(0, 1fr); gap: 8px; }\n.bcm-notebook .bcm-input, .bcm-notebook .bcm-select {\n  appearance: auto;\n  display: block;\n  width: 100%;\n  min-width: 0;\n  min-height: 38px;\n  margin: 0;\n  padding: 7px 9px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 7px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n}\n.bcm-notebook .bcm-input::placeholder { color: var(--bcm-muted); opacity: 1; }\n.bcm-notebook textarea.bcm-input { min-height: 66px; resize: vertical; overflow-wrap: anywhere; background: var(--bcm-subtle); }\n.bcm-notebook textarea.bcm-input:focus { background: var(--bcm-bg); }\n.bcm-result-summary, .bcm-page-label, .bcm-save-state {\n  color: var(--bcm-muted);\n  font-size: 12px;\n  font-variant-numeric: tabular-nums;\n}\n.bcm-notices, .bcm-undo, .bcm-import-preview {\n  margin: 0 18px 12px;\n  padding: 10px 12px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 8px;\n  background: var(--bcm-subtle);\n  overflow-wrap: anywhere;\n}\n.bcm-notices, .bcm-undo { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-notices > span, .bcm-undo > span { flex: 1 1 180px; }\n.bcm-notice-error { color: var(--bcm-danger); background: var(--bcm-danger-bg); }\n.bcm-notebook .bcm-import-preview h3 { font-size: 15px; margin-block-end: 6px; }\n.bcm-notebook .bcm-import-preview p { margin-block-end: 10px; }\n\n.bcm-note-list { padding-inline: 18px; }\n.bcm-note {\n  display: grid;\n  min-width: 0;\n  gap: 10px;\n  padding-block: 16px 18px;\n  border-block-start: 1px solid var(--bcm-line);\n}\n.bcm-meta-tags { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }\n.bcm-tag-series, .bcm-tag-episode {\n  max-width: 100%;\n  padding: 3px 8px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 14px;\n  background: var(--bcm-subtle);\n  color: #374151;\n  font-size: 12px;\n  overflow-wrap: anywhere;\n}\n.bcm-tag-series { font-weight: 600; }\n.bcm-tag-episode { background: var(--bcm-bg); }\n.bcm-image-placeholder {\n  display: grid;\n  place-items: center;\n  aspect-ratio: 16 / 9;\n  overflow: hidden;\n  border-radius: 8px;\n  background: var(--bcm-subtle);\n  color: var(--bcm-muted);\n  font-size: 13px;\n  text-align: center;\n}\n.bcm-note-image { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }\n.bcm-playback-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }\n.bcm-notebook .bcm-play-button { font-variant-numeric: tabular-nums; font-weight: 600; }\n.bcm-save-state { text-align: end; }\n.bcm-save-error { color: var(--bcm-danger); }\n.bcm-empty { padding: 26px 0; border-block-start: 1px solid var(--bcm-line); color: var(--bcm-muted); }\n.bcm-notebook .bcm-empty h3 { margin-block-end: 6px; color: var(--bcm-text); font-size: 16px; }\n.bcm-pagination {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  flex-wrap: wrap;\n  gap: 8px;\n  padding: 12px 18px;\n  border-block-start: 1px solid var(--bcm-line);\n}\n.bcm-notebook .bcm-storage-note { padding: 12px 18px 18px; color: var(--bcm-muted); font-size: 12px; }\n\n@media (max-width: 440px) {\n  .bcm-notebook-header, .bcm-filters, .bcm-note-list, .bcm-pagination { padding-inline: 12px; }\n  .bcm-notebook-header .bcm-toolbar .bcm-button { padding-inline: 6px; font-size: 12px; }\n  .bcm-notices, .bcm-undo, .bcm-import-preview { margin-inline: 12px; }\n  .bcm-notebook .bcm-input, .bcm-notebook .bcm-select { font-size: 16px; }\n}\n@media (max-height: 420px) {\n  .bcm-notebook-header { padding-block: 8px; }\n  .bcm-notebook .bcm-subtitle { display: none; }\n  .bcm-notebook-header .bcm-toolbar { margin-block-start: 6px; }\n}\n@media (forced-colors: active) {\n  .bcm-notebook { border-color: CanvasText; }\n  .bcm-notebook .bcm-button { border-color: ButtonText; }\n}\n";
 
   // src/main.js
-  var VERSION = "3.0.0";
+  var VERSION = "3.0.1";
   var clamp = (n, low, high) => Math.max(low, Math.min(high, n));
-  var INTERACTIVE = 'button, a[href], summary, [tabindex]:not([tabindex="-1"]), [role="button"], [role="slider"]';
-  function isInteractiveShortcut(event) {
-    return getDeepActiveElement()?.closest?.(INTERACTIVE) || event.composedPath().some((node2) => node2.matches?.(INTERACTIVE));
+  var BUTTON_LIKE = 'button, a[href], summary, [role="button"], [role="link"]';
+  var SLIDER_LIKE = 'input[type="range"], [role="slider"]';
+  var SLIDER_KEYS = /* @__PURE__ */ new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
+  function yieldsToFocusedControl(event, spec) {
+    const selector = spec === "Space" || spec === "Enter" ? BUTTON_LIKE : SLIDER_KEYS.has(spec) ? SLIDER_LIKE : null;
+    return selector && (getDeepActiveElement()?.closest?.(selector) || event.composedPath().some((node2) => node2.matches?.(selector)));
   }
   function el(tag, className, text2) {
     const node2 = document.createElement(tag);
@@ -2509,10 +2532,35 @@
     notification.setAttribute("role", "status");
     notification.setAttribute("aria-live", "polite");
     root.append(notification);
+    function positionNotification() {
+      if (notification.hidden) return;
+      const viewport = root.getBoundingClientRect();
+      const playerBox = container?.getBoundingClientRect();
+      const inset = 8;
+      if (playerBox && container.isConnected && getComputedStyle(container).visibility === "visible") {
+        const left = Math.max(playerBox.left, viewport.left);
+        const right = Math.min(playerBox.right, viewport.right);
+        const top = Math.max(playerBox.top, viewport.top);
+        const bottom = Math.min(playerBox.bottom, viewport.bottom);
+        if (right - left > 32 && bottom - top > 32) {
+          notification.style.setProperty("--bcm-toast-max-width", `${right - left - inset * 2}px`);
+          const { width, height } = notification.getBoundingClientRect();
+          const center = clamp(playerBox.left + playerBox.width / 2, left + width / 2 + inset, right - width / 2 - inset);
+          const topLimit = Math.max(top, bottom - height - inset);
+          notification.style.left = `${center - viewport.left}px`;
+          notification.style.top = `${clamp(playerBox.top + 56, top, topLimit) - viewport.top}px`;
+          return;
+        }
+      }
+      notification.style.removeProperty("--bcm-toast-max-width");
+      notification.style.removeProperty("left");
+      notification.style.removeProperty("top");
+    }
     function notify(message, { kind = "info", duration = kind === "error" ? 7e3 : 3e3 } = {}) {
       notification.textContent = message;
       notification.dataset.kind = kind;
       notification.hidden = false;
+      positionNotification();
       notification.getAnimations().forEach((animation) => animation.cancel());
       if (duration === 1600 && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
         notification.animate([{ opacity: 1, offset: 0 }, { opacity: 1, offset: 0.88 }, { opacity: 0 }], duration);
@@ -2737,6 +2785,7 @@
     }
     function paint() {
       frame = null;
+      positionNotification();
       if (!mask || !snapshot || !config) return;
       const rect = player.getVideoRect();
       if (!rect) return;
@@ -3009,9 +3058,11 @@
         }
         return;
       }
-      if (!snapshot || !panel.hidden || isEditableEvent(event) || isInteractiveShortcut(event) || event.isComposing) return;
+      if (!snapshot || !panel.hidden || isEditableEvent(event) || event.isComposing) return;
+      const spec = eventToShortcut(event, { allowModifierOnly: true });
+      if (!spec || yieldsToFocusedControl(event, spec)) return;
       const shortcuts = config.shortcuts || DEFAULT_SHORTCUTS;
-      if (shortcuts.peek && matchesShortcut(event, shortcuts.peek, { allowModifierOnly: true })) {
+      if (spec === shortcuts.peek) {
         if (!peek) {
           peek = true;
           paint();
@@ -3024,10 +3075,10 @@
       }
       if (event.repeat) return;
       let action;
-      if (matchesShortcut(event, shortcuts.capture)) action = capture;
-      else if (matchesShortcut(event, shortcuts.notebook)) action = () => notebook.toggle().catch(fail2);
-      else if (matchesShortcut(event, shortcuts.toggleMask)) action = toggleMask;
-      else if (matchesShortcut(event, shortcuts.editMask)) action = toggleEdit;
+      if (spec === shortcuts.capture) action = capture;
+      else if (spec === shortcuts.notebook) action = () => notebook.toggle().catch(fail2);
+      else if (spec === shortcuts.toggleMask) action = toggleMask;
+      else if (spec === shortcuts.editMask) action = toggleEdit;
       if (action) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -3052,6 +3103,9 @@
     }, { signal: events.signal });
     document.addEventListener("fullscreenchange", fullscreen, { signal: events.signal });
     window.addEventListener("resize", schedulePaint, { passive: true, signal: events.signal });
+    window.addEventListener("scroll", () => {
+      if (!notification.hidden) schedulePaint();
+    }, { capture: true, passive: true, signal: events.signal });
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && snapshot) {
         config = settings.get(configSeries);

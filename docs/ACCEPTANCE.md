@@ -1,4 +1,31 @@
-# v3.0.0 验收与发布检查
+# v3.0.1 验收与发布检查
+
+记录日期为 2026-11-25。
+
+## v3.0.1 自动检查
+
+| 检查 | 结果 | 覆盖范围 |
+| --- | --- | --- |
+| `npm run check` | Windows / Node.js 24.13.0，70 项通过 | 旧默认键位迁移、保留自定义键位、空导出拦截、Markdown 本地时间和空备注、旧数据兼容、构建及产物语法 |
+| `npm run test:browser` | 隔离配置的无头 Edge，14 项通过 | 全屏按钮、进度条、记录库关闭后焦点回归，原生空格和方向键让位，Shadow DOM 输入，播放器内提示，空分集和空搜索无下载 |
+| UI | 1280 × 850 与 390 × 780 | 桌面和窄屏截图已复核，记录库和设置未出现横向溢出。静态设计扫描无发现。 |
+
+模拟播放器截图见本地 `artifacts/v3.0.1-desktop-player.png`、`artifacts/v3.0.1-desktop.png`、`artifacts/v3.0.1-narrow.png` 与 `artifacts/v3.0.1-narrow-settings.png`。
+
+## v3.0.1 真实 B 站验证
+
+使用独立 Edge 配置在 1440 × 900 下将构建产物注入真实播放页，时区为 Asia/Shanghai。
+
+| 页面 | 实测结果 |
+| --- | --- |
+| [植物学双语合集第 2 P](https://www.bilibili.com/video/BV1NE421A72S/?p=2) 与 [第 1 P](https://www.bilibili.com/video/BV1NE421A72S/) | 点击播放/暂停、倍速、全屏以及关闭记录库后，直接按 `C` 均能记录，按住 `Alt` 可临时查看。提示位于播放器内，距顶边 56 px。第 2 P 导出的 Markdown 包含本地记录时间，只有已填写的备注出现在文件中。第 1 P 无记录时导出 JSON 显示提示，未触发下载。 |
+| [我的三体之章北海传第 1 集](https://www.bilibili.com/bangumi/play/ep300998) 与 [第 9 集](https://www.bilibili.com/bangumi/play/ep314477) | 同样通过原生控件与工具栏焦点测试，提示距播放器顶边 56 px。第 1 集的 Markdown 备注及本地时间格式正确，第 9 集无记录时拦截导出。 |
+
+由脚本管理器覆盖旧版本、登录态评论区操作和 ScriptCat 商店同步仍待核对。旧配置和 Shadow DOM 评论区行为已有自动化覆盖。
+
+---
+
+## v3.0.0 验收历史
 
 记录日期为 2026-11-25。以下分别记录模拟播放器、真实 B 站播放页和脚本管理器中的验证结果。
 
