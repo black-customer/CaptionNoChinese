@@ -340,6 +340,24 @@ test('readable JSON page state provides season identity without executing script
     adapter.dispose();
 });
 
+test('current bangumi hydration data supplies series and episode labels and ignores stale routes', () => {
+    const env = fixture({ url: 'https://www.bilibili.com/bangumi/play/ep42' });
+    env.document.title = '一部剧第 1 集-国创-全集-高清独家在线观看-bilibili-哔哩哔哩';
+    env.scripts.push({
+        id: '__NEXT_DATA__', type: 'application/json',
+        textContent: JSON.stringify({ props: { pageProps: { dehydratedState: { queries: [{
+            queryKey: ['pgc/view/web/simple/season', { ep_id: 42 }],
+            state: { data: { season_id: 7, title: '一部剧' } }
+        }] } } } })
+    });
+    const adapter = createPlayerAdapter(env);
+    const { identity } = adapter.getCurrent();
+    assert.deepEqual([identity.seriesId, identity.seriesTitle, identity.epTitle], ['season_7', '一部剧', '第 1 集']);
+    env.window.history.pushState({}, '', '/bangumi/play/ep99');
+    assert.equal(adapter.getCurrent().identity.seriesId, 'bgm_ep99');
+    adapter.dispose();
+});
+
 test('missing-player recovery is bounded and disposal cancels pending capture and seek work', async () => {
     const missing = fixture();
     missing.containers.length = 0;

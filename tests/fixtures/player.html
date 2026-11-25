@@ -3,12 +3,17 @@
   body{margin:0;background:#eef1f4;color:#152433;font:16px/1.5 system-ui}main{max-width:1080px;margin:28px auto;padding:0 20px}
   h1{font-size:24px}.bpx-player-video-wrap{position:relative;width:100%;height:540px;background:#000}
   video{display:block;width:100%;height:100%;object-fit:contain}.bpx-player-video-wrap:fullscreen{height:100vh;width:100vw}
+  .native-actions{position:absolute;top:12px;right:12px;z-index:90;display:flex;gap:4px}
+  .native-actions button{margin:0}
   button,input{font:inherit;padding:8px;margin:4px}canvas{display:none}.outside{padding:16px}
 </style>
 <main><h1>播放器集成测试</h1><button id="fullscreen">进入播放器全屏</button><button id="next">下一 P</button>
-<div class="bpx-player-video-wrap"><video muted playsinline></video></div>
+<div class="bpx-player-video-wrap"><video muted playsinline></video><div class="native-actions"><button>追剧</button><button>反馈</button></div></div>
 <div class="outside"><input aria-label="评论" placeholder="评论输入框"><p>播放器外的评论区</p></div></main>
 <script>
+  window.__INITIAL_STATE__ = { videoData: { bvid: 'BV1xx411c7mD', title: '英语练习片段', pages: [
+    { page: 1, part: '第一段' }, { page: 2, part: '第二段' }
+  ] } };
   const video = document.querySelector('video');
   const canvas = document.createElement('canvas'); canvas.width=1280;canvas.height=720;document.body.append(canvas);
   const ctx = canvas.getContext('2d');
@@ -18,7 +23,7 @@
   ctx.fillStyle='#ffe5a0';ctx.fillText('明天见。',640,635);
   const stream=canvas.captureStream(10);video.srcObject=stream;
   const actualPlay=video.play.bind(video),actualPause=video.pause.bind(video);
-  window.fixture={time:42,playing:false,plays:0,seed:async function(notes){
+  window.fixture={time:42,playing:false,plays:0,pauses:0,seed:async function(notes){
     return new Promise((resolve,reject)=>{const request=indexedDB.open('BiliCaptionStudyDB',2);request.onerror=()=>reject(request.error);request.onsuccess=()=>{
       const db=request.result,tx=db.transaction('notes','readwrite');for(const n of notes)tx.objectStore('notes').put(n);tx.oncomplete=()=>{db.close();resolve()};tx.onerror=()=>reject(tx.error);
     }});
@@ -28,7 +33,7 @@
   }});
   Object.defineProperty(video,'duration',{configurable:true,get:()=>180});
   video.play=()=>{fixture.playing=true;fixture.plays++;return actualPlay()};
-  video.pause=()=>{fixture.playing=false;actualPause()};
+  video.pause=()=>{fixture.playing=false;fixture.pauses++;actualPause()};
   actualPlay().catch(()=>{});
   document.querySelector('#fullscreen').onclick=()=>document.querySelector('.bpx-player-video-wrap').requestFullscreen();
   document.querySelector('#next').onclick=()=>{

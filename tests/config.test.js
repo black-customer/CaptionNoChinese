@@ -23,13 +23,12 @@ test('config defaults are independent snapshots and geometry remains inside the 
     const defaults = store.get('one');
     assert.deepEqual(defaults, {
         enabled: true, left: 15, top: 84, width: 70, height: 7.2, blur: 14, mode: 'blur',
-        singleKeys: true, leadIn: 3, loopBefore: 3, loopAfter: 3, loopCount: 3, loopGap: 0, playbackRate: 1, reviewBatch: 20,
         shortcuts: { ...DEFAULT_SHORTCUTS }
     });
     defaults.left = 0;
     defaults.shortcuts.capture = 'X';
     assert.equal(store.get('one').left, 15);
-    assert.equal(store.get('one').shortcuts.capture, 'Alt+S');
+    assert.equal(store.get('one').shortcuts.capture, 'C');
     const clamped = store.patch('one', { left: 200, top: 100, width: 500, height: -1 });
     assert.deepEqual([clamped.left, clamped.top, clamped.width, clamped.height], [0, 98, 100, 2]);
     const minimum = store.patch('one', { left: -4, top: -2, width: 1, height: 1 });
@@ -81,13 +80,13 @@ test('global patches read the latest state and merge settings from another insta
 test('reset restores only one series geometry and preserves global options and other series', () => {
     const localStorage = memoryStorage();
     const store = createConfigStore({ localStorage });
-    store.patch('one', { top: 30, width: 40, enabled: false, playbackRate: 1.5 });
+    store.patch('one', { top: 30, width: 40, enabled: false, blur: 22 });
     store.patch('two', { top: 60 });
     const result = store.reset('one');
     assert.equal(result.top, 84);
     assert.equal(result.width, 70);
     assert.equal(result.enabled, false);
-    assert.equal(result.playbackRate, 1.5);
+    assert.equal(result.blur, 22);
     assert.equal(store.get('two').top, 60);
 });
 
@@ -100,7 +99,7 @@ test('malformed legacy/new values fall back to safe defaults without NaN or null
     const store = createConfigStore({ localStorage });
     const config = store.get('one');
     assert.equal(config.enabled, true);
-    assert.equal(config.playbackRate, 1);
+    assert.equal(config.playbackRate, undefined);
     assert.equal(config.mode, 'blur');
     assert.equal(config.blur, 14);
     assert.deepEqual([config.left, config.top, config.width, config.height], [0, 84, 100, 2]);
@@ -123,11 +122,19 @@ test('invalid patches and prototype pollution are rejected before any write', ()
     assert.equal(localStorage.writes.length, 0);
 });
 
-test('playback and loop numeric settings clamp to supported ranges', () => {
-    const store = createConfigStore({ localStorage: memoryStorage() });
-    const config = store.patch('one', { blur: 500, leadIn: -3, loopBefore: 90, loopAfter: -2, loopCount: 3.7, loopGap: 900, playbackRate: 10 });
-    assert.deepEqual([config.blur, config.leadIn, config.loopBefore, config.loopAfter, config.loopCount, config.loopGap, config.playbackRate], [40, 0, 60, 0, 4, 30, 3]);
-    assert.deepEqual([store.patch('one', { reviewBatch: 500 }).reviewBatch, store.patch('one', { reviewBatch: 1 }).reviewBatch, store.patch('one', { reviewBatch: 12.6 }).reviewBatch], [100, 5, 13]);
+test('obsolete stored settings are ignored and existing mask settings remain', () => {
+    const obsolete = { singleKeys: false, leadIn: 4, loopBefore: 2, loopAfter: 5, loopCount: 2, loopGap: 1, playbackRate: 1.5, reviewBatch: 30 };
+    const localStorage = memoryStorage({
+        [GLOBAL_KEY]: JSON.stringify({ ...obsolete, blur: 22, mode: 'solid' }),
+        [`${SERIES_PREFIX}one`]: JSON.stringify({ top: 30 })
+    });
+    const store = createConfigStore({ localStorage });
+    const config = store.get('one');
+    assert.deepEqual([config.top, config.blur, config.mode, config.shortcuts.capture], [30, 22, 'solid', 'C']);
+    assert.ok(Object.keys(obsolete).every(key => !Object.hasOwn(config, key)));
+    assert.throws(() => store.patch('one', { leadIn: 4 }), /不支持/);
+    assert.equal(store.patch('one', { blur: 500 }).blur, 40);
+    assert.ok(Object.keys(obsolete).every(key => !Object.hasOwn(JSON.parse(localStorage.getItem(GLOBAL_KEY)), key)));
 });
 
 test('GM storage takes precedence and writes only one backend', () => {
@@ -178,13 +185,13 @@ test('custom shortcuts merge partially across instances, validate strictly and f
     const first = createConfigStore({ localStorage });
     const second = createConfigStore({ localStorage });
     first.patch('one', { shortcuts: { capture: 'ctrl + shift + k', editMask: '' } });
-    second.patch('two', { shortcuts: { peek: 'shift', reveal: 'Enter' } });
+    second.patch('two', { shortcuts: { peek: 'shift', notebook: 'Enter' } });
     assert.deepEqual(first.get('one').shortcuts, {
         ...DEFAULT_SHORTCUTS,
         capture: 'Ctrl+Shift+K',
         editMask: '',
         peek: 'Shift',
-        reveal: 'Enter'
+        notebook: 'Enter'
     });
     assert.throws(() => first.patch('one', { shortcuts: 'Alt+S' }), /对象/);
     assert.throws(() => first.patch('one', { shortcuts: { unknownAction: 'Alt+K' } }), /不支持的快捷键/);
@@ -196,5 +203,5 @@ test('custom shortcuts merge partially across instances, validate strictly and f
     const recovered = first.get('one').shortcuts;
     assert.equal(recovered.capture, DEFAULT_SHORTCUTS.capture);
     assert.equal(recovered.peek, 'Ctrl');
-    assert.equal(recovered.rateGood, 'G');
+    assert.equal(recovered.rateGood, undefined);
 });

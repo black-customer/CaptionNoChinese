@@ -1,9 +1,9 @@
 {
   "name": "bilibili-caption-study",
-  "version": "2.5.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
-  "description": "Bilibili caption mask and local scene review notebook",
+  "description": "Bilibili caption mask and local scene library",
   "license": "MIT",
   "scripts": {
     "build": "node scripts/build.mjs",

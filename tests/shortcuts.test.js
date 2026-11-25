@@ -55,6 +55,7 @@ test('matchesPeekRelease handles modifier-only, single-key and combo peek bindin
 });
 
 test('formatShortcut, normalizeShortcutsMap and findShortcutConflict handle defaults and collisions', () => {
+    assert.deepEqual(DEFAULT_SHORTCUTS, { capture: 'C', notebook: 'Alt+B', toggleMask: 'Alt+A', editMask: 'Alt+Z', peek: 'Alt' });
     assert.equal(formatShortcut(''), '已禁用');
     assert.equal(formatShortcut('Space'), '空格');
     assert.equal(formatShortcut('Ctrl+Shift+Backquote'), 'Ctrl + Shift + `');
@@ -70,7 +71,7 @@ test('formatShortcut, normalizeShortcutsMap and findShortcutConflict handle defa
     const globalConflict = findShortcutConflict({ ...DEFAULT_SHORTCUTS, capture: 'Alt+X', notebook: 'Alt+X' });
     assert.equal(globalConflict?.first.id, 'capture');
     assert.equal(globalConflict?.second.id, 'notebook');
-    const sessionConflict = findShortcutConflict({ ...DEFAULT_SHORTCUTS, rateAgain: 'Q', rateHard: 'Q' });
-    assert.equal(sessionConflict?.first.id, 'rateAgain');
-    assert.equal(sessionConflict?.second.id, 'rateHard');
+    assert.deepEqual(normalizeShortcutsMap({ notebook: 'C', rateGood: 'Q' }), {
+        ...DEFAULT_SHORTCUTS, capture: '', notebook: 'C'
+    });
 });

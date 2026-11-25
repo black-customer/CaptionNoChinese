@@ -37,27 +37,19 @@ const DISPLAY_KEYS = {
 };
 
 export const SHORTCUT_ACTIONS = Object.freeze([
-    { id: 'capture', label: '收藏此句', scope: 'global', allowModifierOnly: false },
-    { id: 'notebook', label: '开关复习本', scope: 'global', allowModifierOnly: false },
+    { id: 'capture', label: '一键记录此句', scope: 'global', allowModifierOnly: false },
+    { id: 'notebook', label: '开关记录库', scope: 'global', allowModifierOnly: false },
     { id: 'toggleMask', label: '开关遮罩', scope: 'global', allowModifierOnly: false },
-    { id: 'editMask', label: '遮罩编辑', scope: 'global', allowModifierOnly: false },
-    { id: 'peek', label: '按住临时查看中文', scope: 'global', allowModifierOnly: true },
-    { id: 'reveal', label: '复习时显示答案', scope: 'session', allowModifierOnly: false },
-    { id: 'rateAgain', label: '复习自评：没听懂', scope: 'session', allowModifierOnly: false },
-    { id: 'rateHard', label: '复习自评：费劲', scope: 'session', allowModifierOnly: false },
-    { id: 'rateGood', label: '复习自评：听懂了', scope: 'session', allowModifierOnly: false }
+    { id: 'editMask', label: '遮罩位置调节', scope: 'global', allowModifierOnly: false },
+    { id: 'peek', label: '按住临时查看中文', scope: 'global', allowModifierOnly: true }
 ]);
 
 export const DEFAULT_SHORTCUTS = Object.freeze({
-    capture: 'Alt+S',
+    capture: 'C',
     notebook: 'Alt+B',
-    toggleMask: 'Alt+C',
+    toggleMask: 'Alt+A',
     editMask: 'Alt+Z',
-    peek: 'Alt',
-    reveal: 'Space',
-    rateAgain: '1',
-    rateHard: '2',
-    rateGood: '3'
+    peek: 'Alt'
 });
 
 function normalizeMainKey(token) {
@@ -103,10 +95,16 @@ export function normalizeShortcut(value, { allowModifierOnly = false } = {}) {
 export function normalizeShortcutsMap(input) {
     const output = { ...DEFAULT_SHORTCUTS };
     if (!input || typeof input !== 'object' || Array.isArray(input)) return output;
+    const overrides = new Map();
     for (const action of SHORTCUT_ACTIONS) {
         if (!Object.hasOwn(input, action.id)) continue;
         const normalized = normalizeShortcut(input[action.id], { allowModifierOnly: action.allowModifierOnly });
-        if (normalized !== null) output[action.id] = normalized;
+        if (normalized !== null) overrides.set(action.id, normalized);
+    }
+    // Saved bindings take precedence if a new default would claim the same key.
+    const reserved = new Set(overrides.values());
+    for (const { id } of SHORTCUT_ACTIONS) {
+        output[id] = overrides.get(id) ?? (reserved.has(DEFAULT_SHORTCUTS[id]) ? '' : DEFAULT_SHORTCUTS[id]);
     }
     return output;
 }
@@ -169,19 +167,16 @@ export function formatShortcut(spec) {
     return spec.split('+').map(part => DISPLAY_KEYS[part] || part).join(' + ');
 }
 
-/** Find duplicate non-empty shortcuts within the same conflict scope. */
+/** Find duplicate non-empty shortcuts. */
 export function findShortcutConflict(shortcuts) {
-    for (const scope of ['global', 'session']) {
-        const seen = new Map();
-        for (const action of SHORTCUT_ACTIONS) {
-            if (action.scope !== scope) continue;
-            const value = shortcuts?.[action.id];
-            if (!value) continue;
-            if (seen.has(value)) {
-                return { first: seen.get(value), second: action, shortcut: value };
-            }
-            seen.set(value, action);
+    const seen = new Map();
+    for (const action of SHORTCUT_ACTIONS) {
+        const value = shortcuts?.[action.id];
+        if (!value) continue;
+        if (seen.has(value)) {
+            return { first: seen.get(value), second: action, shortcut: value };
         }
+        seen.set(value, action);
     }
     return null;
 }

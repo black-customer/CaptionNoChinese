@@ -2,15 +2,18 @@ import { createRepository } from './storage.js';
 import { createPlayerAdapter, formatTime } from './player.js';
 import { createConfigStore } from './config.js';
 import { createNotebook } from './notebook.js';
-import { createReviewController } from './review.js';
-import { nextRollover } from './schedule.js';
-import { isEditableEvent as editable } from './editable.js';
+import { getDeepActiveElement, isEditableEvent as editable } from './editable.js';
 import { DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS, eventToShortcut, findShortcutConflict, formatShortcut, matchesPeekRelease, matchesShortcut } from './shortcuts.js';
 import appStyles from './app.css';
 import notebookStyles from './notebook.css';
 
 const VERSION = __APP_VERSION__;
 const clamp = (n, low, high) => Math.max(low, Math.min(high, n));
+const INTERACTIVE = 'button, a[href], summary, [tabindex]:not([tabindex="-1"]), [role="button"], [role="slider"]';
+function isInteractiveShortcut(event) {
+  return getDeepActiveElement()?.closest?.(INTERACTIVE) ||
+    event.composedPath().some(node => node.matches?.(INTERACTIVE));
+}
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -29,9 +32,8 @@ function start() {
   const style = el('style'); style.id = 'bcm-styles'; style.textContent = appStyles + '\n' + notebookStyles;
   (document.head || document.documentElement).append(style);
   document.body.append(root);
-  let local, session;
+  let local;
   try { local = window.localStorage; } catch { /* Database errors will explain unavailable storage. */ }
-  try { session = window.sessionStorage; } catch { /* Review sittings still run, but cannot continue after a cross-video navigation. */ }
   const gmGet = typeof GM_getValue === 'function' ? GM_getValue : undefined;
   const gmSet = typeof GM_setValue === 'function' ? GM_setValue : undefined;
   const repo = createRepository({ localStorage: local, gmGet, gmSet });
@@ -39,7 +41,7 @@ function start() {
   const player = createPlayerAdapter({ window, document });
   let snapshot = null, config, container, mask, dock, resizeObserver, mountAbort;
   let edit = false, peek = false, wheeling = false, captureBusy = false, initialized = false;
-  let hideTimer, wheelTimer, saveTimer, toastTimer, dueTimer, frame, drag, configSeries;
+  let hideTimer, wheelTimer, saveTimer, toastTimer, frame, drag, configSeries;
   let countGeneration = 0, panelReturnFocus;
   let geometryDirty = false;
   const notification = el('div', 'bcm-notification'); notification.hidden = true;
@@ -47,50 +49,46 @@ function start() {
   root.append(notification);
   function notify(message, { kind = 'info', duration = kind === 'error' ? 7000 : 3000 } = {}) {
     notification.textContent = message; notification.dataset.kind = kind; notification.hidden = false;
+    notification.getAnimations().forEach(animation => animation.cancel());
+    if (duration === 1600 && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      notification.animate([{ opacity: 1, offset: 0 }, { opacity: 1, offset: .88 }, { opacity: 0 }], duration);
+    }
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { notification.hidden = true; }, duration);
   }
   const fail = error => notify(error?.message || '操作失败，请重试。', { kind: 'error' });
   const panel = el('section', 'bcm-panel'); panel.hidden = true; panel.inert = true;
-  panel.setAttribute('aria-label', '遮罩与复习设置'); root.append(panel);
+  root.append(panel);
   function closePanel() {
     panel.hidden = true; panel.inert = true;
     if (panelReturnFocus?.isConnected) panelReturnFocus.focus();
     wakeDock();
   }
   function showPanel(title) {
-    panelReturnFocus = document.activeElement; panel.replaceChildren(el('h2', '', title));
+    panelReturnFocus = getDeepActiveElement(); panel.replaceChildren(el('h2', '', title));
+    panel.setAttribute('aria-label', title);
     panel.hidden = false; panel.inert = false; wakeDock();
   }
   function showHelp() {
-    const currentCfg = settings.get(snapshot?.identity.seriesId || 'global_default');
-    const sc = currentCfg.shortcuts || DEFAULT_SHORTCUTS;
-    const captureKey = sc.capture === DEFAULT_SHORTCUTS.capture && currentCfg.singleKeys ? `${formatShortcut(sc.capture)} / S` : formatShortcut(sc.capture);
-    const notebookKey = sc.notebook === DEFAULT_SHORTCUTS.notebook && currentCfg.singleKeys ? `${formatShortcut(sc.notebook)} / B` : formatShortcut(sc.notebook);
-    const toggleKey = sc.toggleMask === DEFAULT_SHORTCUTS.toggleMask ? `${formatShortcut(sc.toggleMask)} / Shift + C` : formatShortcut(sc.toggleMask);
-    const editKey = sc.editMask === DEFAULT_SHORTCUTS.editMask ? `${formatShortcut(sc.editMask)} / Shift + Z` : formatShortcut(sc.editMask);
-    const peekKey = sc.peek ? `悬停遮罩 / 按住 ${formatShortcut(sc.peek)}` : '悬停遮罩';
-    const rateKeys = [sc.rateAgain, sc.rateHard, sc.rateGood].map(formatShortcut).join(' / ');
-    showPanel(`看剧学英语 v${VERSION}`);
-    panel.append(el('p', '', '先遮中文听一遍；遇到难句收藏，再回到原片段复听。所有快捷键均可在「设置」中自定义或禁用。'));
+    const shortcuts = settings.get(snapshot?.identity.seriesId).shortcuts;
+    showPanel('操作帮助');
+    const captureHint = shortcuts.capture ? `按 ${formatShortcut(shortcuts.capture)}` : '点击「记录」';
+    panel.append(el('p', '', `看剧时${captureHint}即可静默记录。看完一集，打开记录库回听、写备注，再导出 JSON 或 Markdown。`));
     const list = el('dl');
-    for (const [key, desc] of [
-      [captureKey, '收藏当前画面与来源时间；关闭单字母快捷键或自定义键位后，按设置的快捷键生效。'],
-      [notebookKey, '打开场景复习本，搜索、标记掌握或导出备份。'],
-      ['Alt + 滚轮', '只在播放器内微调遮罩高度。'],
-      [peekKey, '临时看清中文，移开或松键恢复。'],
-      [editKey, '进入或退出拖动、拉伸模式。'],
-      [toggleKey, '开关中文字幕遮罩。'],
-      ['循环复听', '以收藏点前后几秒为区间，完成后返回开始复习前的进度。'],
-      ['到期复习', `复习本顶部点“开始复习”：先听、回想，${formatShortcut(sc.reveal)}显示答案，再按 ${rateKeys} 自评，下次复习按间隔排期。`],
-    ]) list.append(el('dt', '', key), el('dd', '', desc));
-    panel.append(list, el('p', '', '收藏只保存在当前浏览器的本机数据中。建议定期在复习本导出 JSON 备份；HTML 用于离线阅读。'));
-    const done = button('开始看剧', closePanel, 'bcm-primary'); panel.append(done); done.focus();
+    for (const { id, label } of SHORTCUT_ACTIONS) {
+      const description = el('dd');
+      description.append(el('kbd', '', formatShortcut(shortcuts[id])));
+      if (id === 'peek') description.append(' 也可悬停在遮罩上');
+      list.append(el('dt', '', label), description);
+    }
+    list.append(el('dt', '', '微调遮罩高度'), el('dd', '', '在播放器内按 Alt + 滚轮'));
+    panel.append(list, el('p', '', '记录保存在当前浏览器。JSON 含截图并可重新导入，Markdown 用于整理文字，HTML 可离线查看截图和备注。'));
+    const done = button('关闭', closePanel, 'bcm-primary'); panel.append(done); done.focus();
   }
   function showSettings() {
     if (!snapshot) return;
     config = settings.get(snapshot.identity.seriesId);
-    showPanel('遮罩与复习设置');
-    panel.append(el('p', '', `v${VERSION} · 位置按剧集记忆，其他偏好与快捷键全局生效。`));
+    showPanel('设置');
+    panel.append(el('p', '', '遮罩位置按剧集保存，其他设置全局生效。'));
     const form = el('form'); const inputs = new Map();
     const add = (key, label, type, min, max, step) => {
       const row = el('label'); row.append(el('span', '', label));
@@ -100,32 +98,24 @@ function start() {
         input.value = config[key];
       } else {
         input.type = type;
-        if (type === 'checkbox') input.checked = config[key];
-        else { input.value = config[key]; input.min = min; input.max = max; input.step = step ?? 1; input.required = true; }
+        input.value = config[key]; input.min = min; input.max = max; input.step = step ?? 1; input.required = true;
       }
       row.append(input); form.append(row); inputs.set(key, input);
     };
     add('mode', '遮挡方式', 'select'); add('blur', '模糊强度', 'number', 0, 40);
-    add('singleKeys', '启用 S / B 单字母快捷键', 'checkbox');
-    add('leadIn', '回听提前（秒）', 'number', 0, 30, .5);
-    add('loopBefore', '循环向前（秒）', 'number', 0, 60, .5);
-    add('loopAfter', '循环向后（秒）', 'number', .5, 60, .5);
-    add('loopCount', '循环次数', 'number', 1, 20);
-    add('loopGap', '循环间隔（秒）', 'number', 0, 10, .5);
-    add('playbackRate', '复听倍速', 'number', .5, 2, .25);
-    add('reviewBatch', '每组复习条数', 'number', 5, 100);
     const shortcutDrafts = { ...DEFAULT_SHORTCUTS, ...(config.shortcuts || {}) };
     const shortcutInputs = new Map();
     const shortcutSection = el('fieldset', 'bcm-shortcut-section');
     const shortcutHeader = el('div', 'bcm-shortcut-header');
-    shortcutHeader.append(el('legend', '', '快捷键设置'), button('恢复默认快捷键', () => {
+    shortcutSection.append(el('legend', '', '快捷键'));
+    shortcutHeader.append(el('p', 'bcm-shortcut-hint', '点击按键框录入，按 Esc 取消。'), button('恢复默认快捷键', () => {
       Object.assign(shortcutDrafts, DEFAULT_SHORTCUTS);
       for (const action of SHORTCUT_ACTIONS) {
         const input = shortcutInputs.get(action.id);
         if (input) input.value = formatShortcut(shortcutDrafts[action.id]);
       }
     }, 'bcm-shortcut-reset'));
-    shortcutSection.append(shortcutHeader, el('p', 'bcm-shortcut-hint', '点击按键框后直接按下新组合键；按 Esc 取消录入，点「禁用」可关闭冲突键位。'));
+    shortcutSection.append(shortcutHeader);
     for (const action of SHORTCUT_ACTIONS) {
       const row = el('div', 'bcm-shortcut-row');
       const id = `bcm-shortcut-${action.id}`;
@@ -139,9 +129,9 @@ function start() {
       input.dataset.shortcutAction = action.id;
       input.setAttribute('aria-label', `${action.label}快捷键`);
       input.value = formatShortcut(shortcutDrafts[action.id]);
-      let recordedModifierOnly = false;
+      let pendingModifier = null;
       input.addEventListener('focus', () => {
-        recordedModifierOnly = false;
+        pendingModifier = null;
         input.dataset.recording = 'true';
         input.value = '请按下快捷键…';
       });
@@ -157,20 +147,21 @@ function start() {
         if (event.isComposing || event.repeat) return;
         const spec = eventToShortcut(event, { allowModifierOnly: action.allowModifierOnly });
         if (!spec) return;
-        shortcutDrafts[action.id] = spec;
-        input.value = formatShortcut(spec);
         if (action.allowModifierOnly && ['Alt', 'Shift', 'Ctrl'].includes(spec)) {
-          recordedModifierOnly = true;
+          pendingModifier = spec;
+          input.value = formatShortcut(spec);
         } else {
-          recordedModifierOnly = false;
+          pendingModifier = null;
+          shortcutDrafts[action.id] = spec;
           input.blur();
         }
       });
       input.addEventListener('keyup', event => {
-        if (recordedModifierOnly && input.dataset.recording === 'true') {
+        if (pendingModifier && matchesPeekRelease(event, pendingModifier) && input.dataset.recording === 'true') {
           event.preventDefault();
           event.stopPropagation();
-          recordedModifierOnly = false;
+          shortcutDrafts[action.id] = pendingModifier;
+          pendingModifier = null;
           input.blur();
         }
       });
@@ -192,49 +183,29 @@ function start() {
     }), button('关闭', closePanel));
     form.append(actions); form.addEventListener('submit', event => {
       event.preventDefault(); const patch = {};
-      for (const [key, input] of inputs) patch[key] = input.type === 'checkbox' ? input.checked : input.tagName === 'SELECT' ? input.value : Number(input.value);
-      if (patch.loopBefore + patch.loopAfter <= 0) { notify('循环区间需要大于 0 秒', { kind: 'error' }); return; }
+      for (const [key, input] of inputs) patch[key] = input.tagName === 'SELECT' ? input.value : Number(input.value);
       const conflict = findShortcutConflict(shortcutDrafts);
       if (conflict) {
         notify(`快捷键冲突：「${conflict.first.label}」与「${conflict.second.label}」不能同为 ${formatShortcut(conflict.shortcut)}`, { kind: 'error' });
         return;
       }
       patch.shortcuts = { ...shortcutDrafts };
-      try { config = settings.patch(snapshot.identity.seriesId, patch); paint(); notebook.refreshShortcuts(); closePanel(); notify('设置已保存'); } catch (error) { fail(error); }
+      try { config = settings.patch(snapshot.identity.seriesId, patch); peek = false; paint(); closePanel(); notify('设置已保存'); } catch (error) { fail(error); }
     });
     panel.append(form); inputs.get('mode').focus();
   }
-  const loopbar = el('div', 'bcm-loopbar'); loopbar.hidden = true;
-  const loopText = el('span'); root.append(loopbar);
-  const review = createReviewController({ player, notify, onState(state) {
-    loopbar.hidden = !state.active;
-    loopText.textContent = `循环 ${state.iteration || 1} / ${state.count || 1} · ${formatTime(state.start)}–${formatTime(state.end)}`;
-  } });
-  loopbar.append(loopText, button('结束并返回', () => review.stop({ restore: true }).catch(fail)));
   const notebook = createNotebook({ repo, player, notify, version: VERSION, onChange: updateCount,
-    sessionStorage: session,
-    getLeadIn: () => settings.get(snapshot?.identity.seriesId || 'global_default').leadIn,
-    getBatchSize: () => settings.get(snapshot?.identity.seriesId || 'global_default').reviewBatch,
-    getShortcuts: () => settings.get(snapshot?.identity.seriesId || 'global_default').shortcuts,
-    onHelp: showHelp, onSettings: showSettings, onLoop: async note => {
-      config = settings.get(snapshot?.identity.seriesId || note.seriesId);
-      return review.start(note, { before: config.loopBefore, after: config.loopAfter, count: config.loopCount, gap: config.loopGap, rate: config.playbackRate });
-    },
-  });
+    onHelp: showHelp, onSettings: showSettings });
   root.append(notebook.element);
 
   async function updateCount() {
     const generation = ++countGeneration; const sid = snapshot?.identity.seriesId;
-    clearTimeout(dueTimer);
     if (!sid) return;
     try {
-      const [total, due] = await Promise.all([repo.count(sid), repo.countDue(sid)]);
-      if (generation === countGeneration && dock) dock.querySelector('[data-action="notebook"]').textContent = due > 0 ? `待复习 ${due}` : `复习本 ${total}`;
+      const total = await repo.count(sid);
+      if (generation === countGeneration && dock) dock.querySelector('[data-action="notebook"]').textContent = `记录库 ${total}`;
     } catch { /* Initial load/capture shows the actual error; never replace it with a fake count. */ }
-    // Cards become due while a tab stays open; read again at the next day boundary.
-    dueTimer = setTimeout(refreshDue, Math.min(Math.max(nextRollover() - Date.now() + 1000, 1000), 2147483647));
   }
-  function refreshDue() { updateCount(); notebook.refreshDue(); }
   function saveGeometry() {
     clearTimeout(saveTimer); saveTimer = null;
     if (!geometryDirty || !config || !configSeries) return;
@@ -279,28 +250,28 @@ function start() {
   function toggleMask() { if (snapshot) { config = settings.patch(configSeries, { enabled: !config.enabled }); paint(); wakeDock(); } }
   async function capture() {
     if (captureBusy || !snapshot) return;
-    captureBusy = true; const btn = dock?.querySelector('[data-action="capture"]');
-    if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+    captureBusy = true;
     try {
+      const current = player.getCurrent(); const time = player.getTime();
       let shot;
       try { shot = await player.capture(); }
       catch (error) {
         if (!['FRAME_UNAVAILABLE', 'CAPTURE_FAILED', 'CAPTURE_TIMEOUT'].includes(error.code)) throw error;
-        const current = player.getCurrent(); const time = player.getTime();
         if (!current || time === null || !current.sourceReady) throw error;
         // An unavailable image must not erase the useful source bookmark.
         shot = { identity: current.identity, time, imageBlob: null };
       }
       const note = {
         id: `note_${crypto.randomUUID()}`, ...shot.identity, time: shot.time, timeStr: formatTime(shot.time),
-        userNote: '', tags: [], reviewState: 'new', createdAt: Date.now(), updatedAt: Date.now(),
+        userNote: '', createdAt: Date.now(),
       };
       if (shot.imageBlob) note.imageBlob = shot.imageBlob;
       await repo.save(note);
-      await updateCount(); if (notebook.isOpen()) await notebook.refresh();
-      notify(shot.imageBlob ? `已收藏 ${note.timeStr} · 可在复习本回听` : `画面无法截取，已保存 ${note.timeStr} 的来源书签`, { kind: 'success' });
+      notify(shot.imageBlob ? `已记录 ${note.timeStr}` : `已记录 ${note.timeStr}，截图不可用`, { kind: 'success', duration: 1600 });
+      void updateCount();
+      if (notebook.isOpen()) void notebook.refresh();
     } catch (error) { fail(error); }
-    finally { captureBusy = false; if (btn?.isConnected) { btn.disabled = false; btn.textContent = '收藏此句'; } }
+    finally { captureBusy = false; }
   }
   function cancelDrag(save = true) {
     if (!drag) return; const pointer = drag.pointerId; drag = null;
@@ -320,7 +291,7 @@ function start() {
     if (getComputedStyle(container).position === 'static') {
       container.dataset.bcmPreviousPosition = container.style.position; container.dataset.bcmPositionOwner = VERSION; container.style.position = 'relative';
     }
-    mask = el('div', 'bcm-mask'); mask.setAttribute('aria-label', '中文字幕遮罩');
+    mask = el('div', 'bcm-mask bcm-theme'); mask.setAttribute('aria-label', '中文字幕遮罩');
     const tools = el('div', 'bcm-mask-tools'); tools.append(el('span', '', '调整字幕区域'), button('完成', toggleEdit)); mask.append(tools);
     for (const pos of ['n','s','e','w','nw','ne','sw','se']) { const h = el('span', 'bcm-handle'); h.dataset.handle = pos; mask.append(h); }
     mask.addEventListener('dblclick', event => { event.stopPropagation(); toggleEdit(); }, { signal });
@@ -353,10 +324,10 @@ function start() {
       Object.assign(config, { left, top, width, height }); geometryDirty = true; schedulePaint();
     }, { signal });
     for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) mask.addEventListener(type, () => cancelDrag(), { signal });
-    dock = el('div', 'bcm-dock'); dock.setAttribute('role', 'toolbar'); dock.setAttribute('aria-label', `看剧学英语 v${VERSION}`);
+    dock = el('div', 'bcm-dock bcm-theme'); dock.setAttribute('role', 'toolbar'); dock.setAttribute('aria-label', `看剧学英语 v${VERSION}`);
     for (const [name, title, action] of [
       ['version', `v${VERSION}`, showSettings], ['toggle', '遮罩 开', toggleMask], ['edit', '调节', toggleEdit],
-      ['capture', '收藏此句', capture], ['notebook', '复习本', () => notebook.toggle().catch(fail)], ['help', '帮助', showHelp],
+      ['capture', '记录', capture], ['notebook', '记录库', () => notebook.toggle().catch(fail)], ['help', '帮助', showHelp],
     ]) {
       const b = button(title, () => { try { action(); } catch (error) { fail(error); } }, name === 'version' ? 'bcm-version-button' : '');
       b.dataset.action = name; dock.append(b);
@@ -385,27 +356,24 @@ function start() {
     snapshot = current;
     if (!current || current.container !== container || current.media !== prev?.media) mount(current);
     else paint();
-    if (current?.identity.seriesId !== prev?.identity.seriesId) { updateCount(); if (notebook.isOpen()) notebook.refresh().catch(fail); }
+    if (current?.identity.seriesId !== prev?.identity.seriesId) {
+      dock?.querySelector('[data-action="notebook"]').replaceChildren('记录库');
+      updateCount();
+    }
+    if (current?.identity.seriesId !== prev?.identity.seriesId ||
+        current?.identity.source.sourceId !== prev?.identity.source.sourceId) notebook.refreshSource();
     if (current && !initialized) {
       initialized = true;
       repo.ready().then(updateCount).catch(fail);
       player.resumePendingSeek().then(result => {
-        if (result.resumed) { notify('已返回收藏片段'); player.getCurrent()?.media.play?.().catch(() => notify('已定位收藏片段，点击播放继续')); }
+        if (result.resumed) { notify('已定位记录片段'); player.getCurrent()?.media.play?.().catch(() => notify('已定位记录片段，点击播放继续')); }
       }).catch(fail);
-      // A sitting that navigated to another video continues on the page it asked for.
-      notebook.resumeSession().catch(fail);
-      try {
-        if (!local?.getItem('bili_caption_welcome_v240')) {
-          notify(`v${VERSION} 已就绪 · S 收藏，B 打开复习本；帮助中可查看全部操作`, { duration: 6000 });
-          local?.setItem('bili_caption_welcome_v240', '1');
-        }
-      } catch { /* A welcome message never prevents viewing. */ }
     }
     fullscreen();
   });
   const events = new AbortController();
   window.addEventListener('wheel', event => {
-    if (!snapshot || !event.altKey || event.ctrlKey || event.metaKey || !config.enabled || edit || editable(event) || !container.contains(event.target) || !event.deltaY) return;
+    if (!snapshot || !panel.hidden || !event.altKey || event.ctrlKey || event.metaKey || !config.enabled || edit || editable(event) || !container.contains(event.target) || !event.deltaY) return;
     event.preventDefault(); event.stopImmediatePropagation();
     config.top = clamp(config.top + (event.deltaY > 0 ? .5 : -.5), 0, 100 - config.height);
     geometryDirty = true;
@@ -421,7 +389,7 @@ function start() {
       else if (edit) { edit = false; cancelDrag(); paint(); }
       return;
     }
-    if (!snapshot || !panel.hidden || editable(event) || event.isComposing) return;
+    if (!snapshot || !panel.hidden || editable(event) || isInteractiveShortcut(event) || event.isComposing) return;
     const shortcuts = config.shortcuts || DEFAULT_SHORTCUTS;
     if (shortcuts.peek && matchesShortcut(event, shortcuts.peek, { allowModifierOnly: true })) {
       if (!peek) { peek = true; paint(); }
@@ -434,11 +402,11 @@ function start() {
     else if (matchesShortcut(event, shortcuts.notebook)) action = () => notebook.toggle().catch(fail);
     else if (matchesShortcut(event, shortcuts.toggleMask)) action = toggleMask;
     else if (matchesShortcut(event, shortcuts.editMask)) action = toggleEdit;
-    else if (config.singleKeys && shortcuts.capture === DEFAULT_SHORTCUTS.capture && matchesShortcut(event, 'S')) action = capture;
-    else if (config.singleKeys && shortcuts.notebook === DEFAULT_SHORTCUTS.notebook && matchesShortcut(event, 'B')) action = () => notebook.toggle().catch(fail);
-    else if (shortcuts.toggleMask === DEFAULT_SHORTCUTS.toggleMask && matchesShortcut(event, 'Shift+C')) action = toggleMask;
-    else if (shortcuts.editMask === DEFAULT_SHORTCUTS.editMask && matchesShortcut(event, 'Shift+Z')) action = toggleEdit;
-    if (action) { event.preventDefault(); event.stopImmediatePropagation(); try { action(); } catch (error) { fail(error); } wakeDock(); }
+    if (action) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      try { action(); } catch (error) { fail(error); }
+      if (action !== capture) wakeDock();
+    }
   }, { capture: true, signal: events.signal });
   window.addEventListener('keyup', event => {
     if (peek && matchesPeekRelease(event, config?.shortcuts?.peek ?? DEFAULT_SHORTCUTS.peek)) { peek = false; paint(); }
@@ -446,12 +414,17 @@ function start() {
   window.addEventListener('blur', () => { peek = false; cancelDrag(); paint(); }, { signal: events.signal });
   document.addEventListener('fullscreenchange', fullscreen, { signal: events.signal });
   window.addEventListener('resize', schedulePaint, { passive: true, signal: events.signal });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && snapshot) { config = settings.get(configSeries); paint(); refreshDue(); } }, { signal: events.signal });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && snapshot) {
+      config = settings.get(configSeries); peek = false; paint(); updateCount();
+      if (notebook.isOpen()) void notebook.refresh();
+    }
+  }, { signal: events.signal });
   window.addEventListener('pagehide', () => { saveGeometry(); }, { signal: events.signal });
   window.addEventListener('unload', () => {
-    unsubscribe(); player.dispose(); review.dispose(); notebook.dispose(); settings.dispose(); repo.close();
+    unsubscribe(); player.dispose(); notebook.dispose(); settings.dispose(); repo.close();
     events.abort(); mountAbort?.abort(); resizeObserver?.disconnect();
-    for (const timer of [hideTimer, wheelTimer, saveTimer, toastTimer, dueTimer]) clearTimeout(timer);
+    for (const timer of [hideTimer, wheelTimer, saveTimer, toastTimer]) clearTimeout(timer);
     if (frame != null) cancelAnimationFrame(frame);
   }, { once: true });
 }

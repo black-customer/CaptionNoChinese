@@ -74,13 +74,24 @@ export function normalizeSource(value, baseUrl = 'https://www.bilibili.com/') {
 }
 
 function cleanTitle(title) {
-    return String(title ?? '').replace(/-(?:电视剧|番剧|电影|纪录片)-全集.*$/, '')
+    return String(title ?? '').replace(/-(?:电视剧|番剧|国创|电影|纪录片|综艺)-全集.*$/, '')
         .replace(/-高清正版在线观看.*$/, '').replace(/_哔哩哔哩(?:_bilibili)?.*$/, '').trim();
 }
 
 function unwrapState(state) {
     return state?.props?.pageProps?.initialState ?? state?.props?.pageProps?.__INITIAL_STATE__ ??
         state?.props?.pageProps ?? state?.initialState ?? state?.__INITIAL_STATE__ ?? state ?? {};
+}
+
+function readHydratedSeason(data, source) {
+    const queries = data.dehydratedState?.queries;
+    if (!Array.isArray(queries)) return null;
+    const [kind, id] = source.sourceId.split(':');
+    const parameter = kind === 'ep' ? 'ep_id' : 'season_id';
+    const match = queries.find(query => query?.queryKey?.[0] === 'pgc/view/web/simple/season' &&
+        String(query.queryKey[1]?.[parameter]) === id);
+    const season = match?.state?.data;
+    return numericId(season?.season_id, 'ss') ? season : null;
 }
 
 /** Resolve identities without relying on a page-world bridge or network request. */
@@ -117,13 +128,22 @@ export function resolveIdentity({ url, title = '', state = null, seasonId = null
         const stateMatches = currentEpisodeId ? stateEpisodeId === currentEpisodeId ||
             listedEpisodes.some(item => numericId(item.id ?? item.ep_id, 'ep') === currentEpisodeId) :
             pathSeasonId === stateSeasonId;
-        const season = pathSeasonId || explicitSeasonId || (stateMatches ? stateSeasonId : null);
+        const hydratedSeason = readHydratedSeason(data, source);
+        const hydratedSeasonId = numericId(hydratedSeason?.season_id, 'ss');
+        const season = pathSeasonId || explicitSeasonId || (stateMatches ? stateSeasonId : null) || hydratedSeasonId;
         seriesId = season ? `season_${season}` : `bgm_${source.episodeId}`;
         if (stateMatches) {
             seriesTitle = cleanTitle(data.mediaInfo?.title ?? data.seasonInfo?.title) || seriesTitle;
             const episode = stateEpisodeId === currentEpisodeId ? info :
                 listedEpisodes.find(item => numericId(item.id ?? item.ep_id, 'ep') === currentEpisodeId);
             episodeTitle ||= String(episode?.long_title ?? episode?.title ?? '').trim();
+        }
+        if (hydratedSeason && hydratedSeasonId === season) {
+            const hydratedTitle = cleanTitle(hydratedSeason.title || hydratedSeason.season_title);
+            if (hydratedTitle) {
+                if (seriesTitle.startsWith(hydratedTitle)) episodeTitle ||= seriesTitle.slice(hydratedTitle.length).trim();
+                seriesTitle = hydratedTitle;
+            }
         }
         episodeTitle ||= source.episodeId ?? `ss${pathSeasonId}`;
     }
@@ -515,7 +535,8 @@ export function createPlayerAdapter({ window = globalThis.window, document = win
     }
 
     function noteSource(note) {
-        return normalizeSource(note?.source ?? note?.identity?.source ?? note?.url);
+        const source = note?.source ?? note?.identity?.source ?? note?.url;
+        return normalizeSource(source) || (!source?.sourceId && normalizeSource(source?.url));
     }
 
     async function setTime(source, seconds) {

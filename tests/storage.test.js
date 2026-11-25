@@ -2,14 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { IDBFactory } from 'fake-indexeddb';
 import { createRepository } from '../src/storage.js';
-import { STEPS } from '../src/schedule.js';
 import { normalizeSource as normalizePlayerSource } from '../src/player.js';
 
 const IMAGE = 'data:image/jpeg;base64,/9j/';
 const LEGACY_KEY = 'bili_caption_notes_v200';
-// A fixed evening and the following one, so due dates do not depend on when the suite runs.
-const FIRST_EVENING = new Date(2026, 10, 24, 21, 30).getTime();
-const NEXT_EVENING = new Date(2026, 10, 25, 21, 30).getTime();
 const note = (id = 'note-1', overrides = {}) => ({
     id, seriesId: 'season-1', seriesTitle: '学习剧集', epTitle: '第一集',
     source: { url: 'http://www.bilibili.com/video/BV123?p=1', videoId: 'BV123', episodeId: '', page: 1, sourceId: 'BV123:1' },
@@ -108,7 +104,7 @@ test('v1 upgrade keeps notes and moves legacy images out of the metadata store',
     assert.equal(saved.imageUrl, IMAGE);
     assert.deepEqual(saved.tags, []);
     assert.equal(saved.reviewState, 'new');
-    assert.deepEqual([saved.dueAt, saved.interval, saved.reps], [null, 0, 0], 'cards from before scheduled review are due now');
+    assert.deepEqual([saved.dueAt, saved.interval, saved.reps], [null, 0, 0]);
     assert.equal(saved.source.url, '');
     assert.equal((await repository.list()).notes[0].imageUrl, undefined);
 });
@@ -191,7 +187,8 @@ test('list filters, sorts, and paginates metadata without opening the media stor
     const repository = createRepository({ indexedDB: control.indexedDB, localStorage: null });
     t.after(() => repository.close());
     await repository.save(note('one', { createdAt: 1 }));
-    await repository.save(note('two', { createdAt: 2, reviewState: 'learning' }));
+    const part = normalizePlayerSource('https://www.bilibili.com/video/BV1xx411c7mD/?p=2');
+    await repository.save(note('two', { createdAt: 2, epTitle: '第二 P', source: part }));
     await repository.save(note('three', { createdAt: 3, userNote: 'different', seriesId: 'season-2' }));
     control.transactions.length = 0;
     const page = await repository.list({ seriesId: 'season-1', query: 'USEFUL', offset: 1, limit: 1 });
@@ -201,9 +198,10 @@ test('list filters, sorts, and paginates metadata without opening the media stor
     assert.equal(page.notes[0].imageBlob, undefined);
     assert.equal(page.notes[0].hasImage, true);
     assert.ok(control.transactions.every(tx => !tx.stores.includes('media')));
-    assert.equal((await repository.list({ status: 'learning' })).total, 1);
-    assert.equal((await repository.list({ status: 'due' })).total, 3);
-    await assert.rejects(repository.list({ status: 'soon' }), /复习筛选状态/);
+    const episode = await repository.list({ sourceId: part.sourceId, query: '第二 P' });
+    assert.deepEqual(episode.notes.map(n => n.id), ['two']);
+    assert.equal(await repository.count(null, part.sourceId), 1);
+    assert.equal(await repository.count('season-2', part.sourceId), 0);
     assert.equal(await repository.count('season-1'), 2);
     await assert.rejects(repository.list({ limit: 0 }), /分页/);
 });
@@ -228,65 +226,35 @@ test('update preserves media and serial concurrent patches do not overwrite one 
     await assert.rejects(repository.update('missing', { userNote: 'hello' }), /不存在/);
 });
 
-test('review schedules from the stored card, keeps media, and due queries follow the schedule', async t => {
-    const { repository } = repoFixture();
-    t.after(() => repository.close());
-    await repository.save(note('one', { createdAt: 1 }));
-    await repository.save(note('two', { createdAt: 2, reviewState: 'mastered' }));
-    await repository.save(note('three', { createdAt: 3, reviewState: 'learning' }));
-    await repository.save(note('four', { createdAt: 4, seriesId: 'season-2' }));
-    // Cards that were never scheduled are due now, oldest first.
-    assert.equal(await repository.countDue(null, FIRST_EVENING), 3);
-    assert.equal(await repository.countDue('season-1', FIRST_EVENING), 2);
-    assert.deepEqual((await repository.list({ status: 'due', now: FIRST_EVENING })).notes.map(n => n.id), ['one', 'three', 'four']);
-    const rated = await repository.review('one', 'good', FIRST_EVENING);
-    assert.deepEqual([rated.reviewState, rated.interval, rated.reps, rated.lapses, rated.lastReviewedAt], ['learning', 1, 1, 0, FIRST_EVENING]);
-    assert.equal(rated.imageUrl, IMAGE);
-    assert.equal(rated.dueAt > FIRST_EVENING, true);
-    assert.equal(await repository.countDue('season-1', FIRST_EVENING + 3600000), 1);
-    const again = await repository.review('one', 'again', NEXT_EVENING);
-    assert.deepEqual([again.interval, again.dueAt, again.reps, again.lapses], [0, NEXT_EVENING, 2, 1]);
-    assert.equal(await repository.countDue('season-1', NEXT_EVENING), 2);
-    const ladder = [];
-    for (let step = 0; step < STEPS.length; step += 1) ladder.push((await repository.review('one', 'good', NEXT_EVENING)).interval);
-    assert.deepEqual(ladder, [...STEPS]);
-    const graduated = await repository.review('one', 'good', NEXT_EVENING);
-    assert.deepEqual([graduated.reviewState, graduated.dueAt, graduated.reps], ['mastered', null, 8]);
-    assert.equal(await repository.countDue('season-1', NEXT_EVENING), 1);
-    const hard = await repository.review('three', 'hard', NEXT_EVENING);
-    assert.deepEqual([hard.interval, hard.dueAt > NEXT_EVENING], [0, true]);
-    assert.equal(await repository.countDue('season-1', NEXT_EVENING), 0);
-    await assert.rejects(repository.review('three', 'easy', NEXT_EVENING), /复习结果/);
-    await assert.rejects(repository.review('missing', 'good', NEXT_EVENING), /不存在/);
-    await assert.rejects(repository.review('three', 'good', -1), /复习时间/);
-    assert.equal((await repository.get('three')).reps, 1);
-});
-
-test('an aborted review leaves the previous schedule untouched', async t => {
-    const control = abortableFactory(new IDBFactory());
-    const repository = createRepository({ indexedDB: control.indexedDB, localStorage: null });
-    t.after(() => repository.close());
-    await repository.ready();
-    await repository.save(note());
-    control.abortNextWrite = true;
-    await assert.rejects(repository.review('note-1', 'good'), /记录复习失败/);
-    assert.deepEqual([(await repository.get('note-1')).reps, await repository.countDue(null, FIRST_EVENING)], [0, 1]);
-});
-
-test('backups carry the schedule and still accept cards from before it', async t => {
+test('old backups preserve historical fields and export by scope with canonical timestamp URLs', async t => {
     const { repository } = repoFixture();
     const { repository: destination } = repoFixture();
     t.after(() => { repository.close(); destination.close(); });
-    const rated = await repository.review((await repository.save(note())).id, 'good', FIRST_EVENING);
-    const exported = JSON.parse(JSON.stringify(await repository.exportBackup()));
+    const historical = { reps: 1, interval: 1, reviewState: 'learning', dueAt: 2000, lastReviewedAt: 1000 };
+    const part = normalizePlayerSource('https://www.bilibili.com/video/BV1xx411c7mD/?p=2');
+    await repository.importBackup(backup([
+        note('note-1', { ...historical, source: part, time: 83.7 }),
+        note('same-series'),
+        note('other-series', { seriesId: 'season-2', source: normalizePlayerSource('https://www.bilibili.com/bangumi/play/ep123') })
+    ]));
+    const exported = JSON.parse(JSON.stringify(await repository.exportBackup({ sourceId: part.sourceId, query: 'USEFUL' })));
     assert.equal(exported.schemaVersion, 1);
+    assert.deepEqual(exported.notes.map(n => n.id), ['note-1']);
+    assert.equal(exported.notes[0].timestampUrl, `${part.url}&t=83`);
+    assert.equal(exported.notes[0].imageUrl, IMAGE);
+    const textOnly = await repository.exportBackup({ seriesId: 'season-1', includeImages: false });
+    assert.equal(textOnly.notes.length, 2);
+    assert.ok(textOnly.notes.every(n => !Object.hasOwn(n, 'imageUrl')));
+    const all = await repository.exportBackup();
+    assert.equal(all.notes.length, 3);
+    assert.equal(all.notes.find(n => n.id === 'other-series').timestampUrl, 'https://www.bilibili.com/bangumi/play/ep123?t=42');
     assert.deepEqual(await destination.importBackup(exported), { imported: 1, skipped: 0 });
     const imported = await destination.get('note-1');
-    assert.deepEqual([imported.reps, imported.interval, imported.reviewState, imported.dueAt, imported.lastReviewedAt], [1, 1, 'learning', rated.dueAt, FIRST_EVENING]);
+    for (const [key, value] of Object.entries(historical)) assert.equal(imported[key], value);
+    assert.equal(imported.imageUrl, IMAGE);
     await destination.importBackup(JSON.parse(JSON.stringify(backup([note('legacy')]))));
     const legacy = await destination.get('legacy');
     assert.deepEqual([legacy.dueAt, legacy.interval, legacy.reps, legacy.lapses, legacy.lastReviewedAt], [null, 0, 0, 0, null]);
-    assert.deepEqual((await destination.list({ status: 'due', now: FIRST_EVENING })).notes.map(n => n.id), ['legacy']);
     for (const patch of [{ dueAt: 'tomorrow' }, { interval: -1 }, { reps: 1.5 }, { lapses: -3 }, { lastReviewedAt: 'yesterday' }]) {
         await assert.rejects(repository.update('note-1', patch));
     }

@@ -1,4 +1,4 @@
-import { RATINGS, compareDue, isDue, schedule } from './schedule.js';
+import { normalizeSource as canonicalSource } from './player.js';
 
 const DB_NAME = 'BiliCaptionStudyDB';
 const DB_VERSION = 2;
@@ -103,7 +103,7 @@ function splitNote(input, { legacy = false, seriesId } = {}) {
         if (typeof tag !== 'string') fail('每个标签都必须是文本');
         return text(tag, '', 100, '标签').trim();
     }).filter(Boolean))];
-    // Cards from before scheduled review have no schedule: they are due now and start at the first step.
+    // Preserve legacy tags and schedule fields in the v1 backup format.
     const interval = input.interval === undefined || input.interval === null ? 0 : number(input.interval, 0, '复习间隔', 36500);
     let media = null;
     if (input.imageBlob !== undefined && input.imageBlob !== null) {
@@ -141,6 +141,28 @@ function storageError(error, fallback) {
     if (error?.name === 'QuotaExceededError') return new Error('浏览器存储空间不足，请导出备份并清理空间后重试');
     if (error?.name === 'AbortError') return new Error(`${fallback}：数据库事务已中止，请重试`);
     return new Error(`${fallback}${error?.message ? `：${error.message}` : ''}`);
+}
+
+function matchesScope(note, seriesId, sourceId) {
+    return (seriesId === null || note.seriesId === seriesId) &&
+        (sourceId === null || note.source?.sourceId === sourceId ||
+            (!note.source?.sourceId && canonicalSource(note.source?.url)?.sourceId === sourceId));
+}
+
+function filterNotes(seriesId, sourceId, query) {
+    if (seriesId !== null) text(seriesId, '', 300, '剧集 ID');
+    if (sourceId !== null) text(sourceId, '', 500, '来源 ID');
+    const needle = text(query, '', 1000, '搜索词').trim().toLocaleLowerCase();
+    return note => matchesScope(note, seriesId, sourceId) &&
+        (!needle || [note.seriesTitle, note.epTitle, note.userNote, ...(note.tags || [])].join('\n').toLocaleLowerCase().includes(needle));
+}
+
+export function timestampUrl(note) {
+    const source = canonicalSource(note.source?.url) || canonicalSource(note.source);
+    if (!source) return null;
+    const url = new URL(source.url);
+    url.searchParams.set('t', String(Math.floor(note.time)));
+    return url.href;
 }
 
 async function blobToDataURL(blob) {
@@ -314,54 +336,25 @@ export function createRepository(options = {}) {
         return readiness;
     }
 
-    async function list({ seriesId = null, query = '', status = 'all', offset = 0, limit = 30, now = Date.now() } = {}) {
-        await ready();
-        if (seriesId !== null) text(seriesId, '', 300, '剧集 ID');
-        if (status !== 'all' && status !== 'due' && !REVIEW_STATES.has(status)) fail('复习筛选状态无效');
+    async function list({ seriesId = null, sourceId = null, query = '', offset = 0, limit = 30 } = {}) {
+        const matches = filterNotes(seriesId, sourceId, query);
         if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) fail('分页参数无效，单页最多 500 张卡片');
-        const needle = text(query, '', 1000, '搜索词').trim().toLocaleLowerCase();
-        const due = status === 'due' ? number(now, Date.now(), '当前时间') : null;
+        await ready();
         return transaction(['notes'], 'readonly', (tx, set) => {
             const page = [];
-            // Due cards are ordered by due time rather than by creation, so the result is gathered before slicing.
-            const found = due === null ? null : [];
             let total = 0;
             const request = tx.objectStore('notes').index('by_created').openCursor(null, 'prev');
             request.onsuccess = () => {
                 const cursor = request.result;
-                if (!cursor) {
-                    if (found) set({ notes: found.sort(compareDue).slice(offset, offset + limit), total });
-                    else set({ notes: page, total });
-                    return;
-                }
+                if (!cursor) { set({ notes: page, total }); return; }
                 const note = cursor.value;
-                if ((seriesId === null || note.seriesId === seriesId) &&
-                    (status === 'all' || (found ? isDue(note, due) : note.reviewState === status)) &&
-                    (!needle || [note.seriesTitle, note.epTitle, note.userNote, ...(note.tags || [])].join('\n').toLocaleLowerCase().includes(needle))) {
-                    if (found) found.push(note);
-                    else if (total >= offset && page.length < limit) page.push(note);
+                if (matches(note)) {
+                    if (total >= offset && page.length < limit) page.push(note);
                     total++;
                 }
                 cursor.continue();
             };
         });
-    }
-
-    async function countDue(seriesId = null, now = Date.now()) {
-        await ready();
-        if (seriesId !== null) text(seriesId, '', 300, '剧集 ID');
-        const due = number(now, Date.now(), '当前时间');
-        let total = 0;
-        return transaction(['notes'], 'readonly', (tx, set) => {
-            const notes = tx.objectStore('notes');
-            const request = (seriesId === null ? notes : notes.index('by_series')).openCursor(seriesId);
-            request.onsuccess = () => {
-                const cursor = request.result;
-                if (!cursor) { set(total); return; }
-                if (isDue(cursor.value, due)) total++;
-                cursor.continue();
-            };
-        }, '读取待复习数量失败');
     }
 
     async function get(id) {
@@ -391,8 +384,8 @@ export function createRepository(options = {}) {
         }, '保存卡片失败');
     }
 
-    /** Read, change and write one card in a single transaction; `changes` receives the stored record. */
-    function applyPatch(tx, id, changes, at, set, abort) {
+    /** Read, change and write one card in a single transaction. */
+    function applyPatch(tx, id, patch, set, abort) {
         const notes = tx.objectStore('notes');
         const media = tx.objectStore('media');
         const request = notes.get(id);
@@ -401,10 +394,9 @@ export function createRepository(options = {}) {
             const image = media.get(id);
             image.onsuccess = () => {
                 try {
-                    const patch = { ...changes(request.result), id, updatedAt: at };
                     const { id: ignored, ...oldImage } = image.result || {};
                     const replacingImage = Object.hasOwn(patch, 'imageBlob') || Object.hasOwn(patch, 'imageUrl');
-                    const entry = splitNote({ ...request.result, ...(replacingImage ? {} : oldImage), ...patch });
+                    const entry = splitNote({ ...request.result, ...(replacingImage ? {} : oldImage), ...patch, id, updatedAt: Date.now() });
                     notes.put(entry.note);
                     if (entry.media) media.put(entry.media);
                     else media.delete(id);
@@ -421,15 +413,7 @@ export function createRepository(options = {}) {
         if (patch.id !== undefined && patch.id !== id) fail('不能修改卡片 ID');
         patch = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
         await ready();
-        return transaction(['notes', 'media'], 'readwrite', (tx, set, abort) => applyPatch(tx, id, () => patch, Date.now(), set, abort), '修改卡片失败');
-    }
-
-    /** Record one self-rating; the next schedule is computed from the stored card. */
-    async function review(id, rating, now = Date.now()) {
-        if (!RATINGS.has(rating)) fail('复习结果无效');
-        const at = number(now, Date.now(), '复习时间');
-        await ready();
-        return transaction(['notes', 'media'], 'readwrite', (tx, set, abort) => applyPatch(tx, id, note => schedule(note, rating, at), at, set, abort), '记录复习失败');
+        return transaction(['notes', 'media'], 'readwrite', (tx, set, abort) => applyPatch(tx, id, patch, set, abort), '修改卡片失败');
     }
 
     async function remove(id) {
@@ -467,27 +451,43 @@ export function createRepository(options = {}) {
         }, '恢复卡片失败');
     }
 
-    async function count(seriesId = null) {
+    async function count(seriesId = null, sourceId = null) {
+        const matches = filterNotes(seriesId, sourceId, '');
         await ready();
         return transaction(['notes'], 'readonly', (tx, set) => {
             const notes = tx.objectStore('notes');
-            const request = seriesId === null ? notes.count() : notes.index('by_series').count(seriesId);
-            request.onsuccess = () => set(request.result);
+            if (sourceId === null) {
+                const request = seriesId === null ? notes.count() : notes.index('by_series').count(seriesId);
+                request.onsuccess = () => set(request.result);
+                return;
+            }
+            let total = 0;
+            const request = (seriesId === null ? notes : notes.index('by_series')).openCursor(seriesId);
+            request.onsuccess = () => {
+                const cursor = request.result;
+                if (!cursor) { set(total); return; }
+                if (matches(cursor.value)) total++;
+                cursor.continue();
+            };
         });
     }
 
-    async function exportBackup() {
+    async function exportBackup({ seriesId = null, sourceId = null, query = '', includeImages = true } = {}) {
+        const matches = filterNotes(seriesId, sourceId, query);
         await ready();
-        const entries = await transaction(['notes', 'media'], 'readonly', (tx, set) => {
+        const entries = await transaction(includeImages ? ['notes', 'media'] : ['notes'], 'readonly', (tx, set) => {
             const result = [];
             const request = tx.objectStore('notes').openCursor();
             request.onsuccess = () => {
                 const cursor = request.result;
                 if (!cursor) { set(result); return; }
+                const note = cursor.value;
+                if (!matches(note)) { cursor.continue(); return; }
+                if (!includeImages) { result.push(note); cursor.continue(); return; }
                 const image = tx.objectStore('media').get(cursor.key);
                 image.onsuccess = () => {
                     const { id: ignored, ...fields } = image.result || {};
-                    result.push({ ...cursor.value, ...fields });
+                    result.push({ ...note, ...fields });
                     cursor.continue();
                 };
             };
@@ -496,6 +496,7 @@ export function createRepository(options = {}) {
         for (const entry of entries) {
             const { imageBlob, hasImage, ...note } = entry;
             if (imageBlob) note.imageUrl = await blobToDataURL(imageBlob);
+            note.timestampUrl = timestampUrl(note);
             notes.push(note);
         }
         return { format: FORMAT, schemaVersion: 1, exportedAt: new Date().toISOString(), notes };
@@ -534,5 +535,5 @@ export function createRepository(options = {}) {
     }
 
     function close() { closed = true; db?.close(); db = null; }
-    return { ready, list, get, save, update, review, remove, restore, count, countDue, exportBackup, previewImport, importBackup, close };
+    return { ready, list, get, save, update, remove, restore, count, exportBackup, previewImport, importBackup, close };
 }
