@@ -3,54 +3,13 @@ import { createPlayerAdapter, formatTime } from './player.js';
 import { createConfigStore } from './config.js';
 import { createNotebook } from './notebook.js';
 import { createReviewController } from './review.js';
+import { nextRollover } from './schedule.js';
+import { isEditableEvent as editable } from './editable.js';
 import appStyles from './app.css';
 import notebookStyles from './notebook.css';
 
 const VERSION = __APP_VERSION__;
 const clamp = (n, low, high) => Math.max(low, Math.min(high, n));
-function getDeepActiveElement(doc = document) {
-  let active = doc?.activeElement;
-  while (active?.shadowRoot?.activeElement) {
-    active = active.shadowRoot.activeElement;
-  }
-  return active;
-}
-function isEditableNode(node) {
-  if (!node) return false;
-  const el = node.nodeType === 3 ? node.parentElement : (node.nodeType === 1 ? node : null);
-  if (!el) return false;
-  if (el.isContentEditable) return true;
-  const tag = (el.tagName || '').toLowerCase();
-  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
-  const role = el.getAttribute?.('role');
-  if (role === 'textbox' || role === 'searchbox' || role === 'combobox') return true;
-  const ce = el.getAttribute?.('contenteditable');
-  if (ce != null && ce !== 'false') return true;
-  if (tag === 'bili-comment-box' || tag === 'bili-comment-reply-box' || tag === 'bili-comments-box-root' || tag === 'bili-comment-editor') return true;
-  if (el.classList?.contains('ProseMirror') || el.classList?.contains('comment-send-box') || el.classList?.contains('reply-box') || el.classList?.contains('bili-comment-box')) return true;
-  if (el.closest?.('input,textarea,select,[role="textbox"],[role="searchbox"],[role="combobox"],[contenteditable]:not([contenteditable="false"]),bili-comment-box,bili-comment-reply-box,bili-comments-box-root,.comment-send-box,.reply-box,.bili-comment-box')) return true;
-  return false;
-}
-function editable(targetOrEvent) {
-  if (!targetOrEvent) return false;
-  const doc = typeof document !== 'undefined' ? document : null;
-  if (doc) {
-    if (isEditableNode(getDeepActiveElement(doc))) return true;
-    if (isEditableNode(doc.activeElement)) return true;
-  }
-  if (typeof targetOrEvent.composedPath === 'function' || 'target' in targetOrEvent) {
-    const event = targetOrEvent;
-    if (isEditableNode(event.target)) return true;
-    if (typeof event.composedPath === 'function') {
-      const path = event.composedPath();
-      for (let i = 0; i < path.length; i++) {
-        if (isEditableNode(path[i])) return true;
-      }
-    }
-    return false;
-  }
-  return isEditableNode(targetOrEvent);
-}
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -69,8 +28,9 @@ function start() {
   const style = el('style'); style.id = 'bcm-styles'; style.textContent = appStyles + '\n' + notebookStyles;
   (document.head || document.documentElement).append(style);
   document.body.append(root);
-  let local;
+  let local, session;
   try { local = window.localStorage; } catch { /* Database errors will explain unavailable storage. */ }
+  try { session = window.sessionStorage; } catch { /* Review sittings still run, but cannot continue after a cross-video navigation. */ }
   const gmGet = typeof GM_getValue === 'function' ? GM_getValue : undefined;
   const gmSet = typeof GM_setValue === 'function' ? GM_setValue : undefined;
   const repo = createRepository({ localStorage: local, gmGet, gmSet });
@@ -78,7 +38,7 @@ function start() {
   const player = createPlayerAdapter({ window, document });
   let snapshot = null, config, container, mask, dock, resizeObserver, mountAbort;
   let edit = false, peek = false, wheeling = false, captureBusy = false, initialized = false;
-  let hideTimer, wheelTimer, saveTimer, toastTimer, frame, drag, configSeries;
+  let hideTimer, wheelTimer, saveTimer, toastTimer, dueTimer, frame, drag, configSeries;
   let countGeneration = 0, panelReturnFocus;
   let geometryDirty = false;
   const notification = el('div', 'bcm-notification'); notification.hidden = true;
@@ -112,6 +72,7 @@ function start() {
       ['Alt + Z / Shift + Z', '进入或退出拖动、拉伸模式。'],
       ['Alt + C / Shift + C', '开关中文字幕遮罩。'],
       ['循环复听', '以收藏点前后几秒为区间，完成后返回开始复习前的进度。'],
+      ['到期复习', '复习本顶部点“开始复习”：先听、回想，空格显示答案，再按 1 / 2 / 3 自评，下次复习按间隔排期。'],
     ]) list.append(el('dt', '', key), el('dd', '', desc));
     panel.append(list, el('p', '', '收藏只保存在当前浏览器的本机数据中。建议定期在复习本导出 JSON 备份；HTML 用于离线阅读。'));
     const done = button('开始看剧', closePanel, 'bcm-primary'); panel.append(done); done.focus();
@@ -143,6 +104,7 @@ function start() {
     add('loopCount', '循环次数', 'number', 1, 20);
     add('loopGap', '循环间隔（秒）', 'number', 0, 10, .5);
     add('playbackRate', '复听倍速', 'number', .5, 2, .25);
+    add('reviewBatch', '每组复习条数', 'number', 5, 100);
     const actions = el('div', 'bcm-panel-actions');
     const submit = el('button', 'bcm-primary', '保存设置'); submit.type = 'submit';
     actions.append(submit, button('重置本剧位置', () => {
@@ -164,22 +126,28 @@ function start() {
   } });
   loopbar.append(loopText, button('结束并返回', () => review.stop({ restore: true }).catch(fail)));
   const notebook = createNotebook({ repo, player, notify, version: VERSION, onChange: updateCount,
+    sessionStorage: session,
     getLeadIn: () => settings.get(snapshot?.identity.seriesId || 'global_default').leadIn,
+    getBatchSize: () => settings.get(snapshot?.identity.seriesId || 'global_default').reviewBatch,
     onHelp: showHelp, onSettings: showSettings, onLoop: async note => {
       config = settings.get(snapshot?.identity.seriesId || note.seriesId);
-      await review.start(note, { before: config.loopBefore, after: config.loopAfter, count: config.loopCount, gap: config.loopGap, rate: config.playbackRate });
+      return review.start(note, { before: config.loopBefore, after: config.loopAfter, count: config.loopCount, gap: config.loopGap, rate: config.playbackRate });
     },
   });
   root.append(notebook.element);
 
   async function updateCount() {
     const generation = ++countGeneration; const sid = snapshot?.identity.seriesId;
+    clearTimeout(dueTimer);
     if (!sid) return;
     try {
-      const total = await repo.count(sid);
-      if (generation === countGeneration && dock) dock.querySelector('[data-action="notebook"]').textContent = `复习本 ${total}`;
+      const [total, due] = await Promise.all([repo.count(sid), repo.countDue(sid)]);
+      if (generation === countGeneration && dock) dock.querySelector('[data-action="notebook"]').textContent = due > 0 ? `待复习 ${due}` : `复习本 ${total}`;
     } catch { /* Initial load/capture shows the actual error; never replace it with a fake count. */ }
+    // Cards become due while a tab stays open; read again at the next day boundary.
+    dueTimer = setTimeout(refreshDue, Math.min(Math.max(nextRollover() - Date.now() + 1000, 1000), 2147483647));
   }
+  function refreshDue() { updateCount(); notebook.refreshDue(); }
   function saveGeometry() {
     clearTimeout(saveTimer); saveTimer = null;
     if (!geometryDirty || !config || !configSeries) return;
@@ -337,6 +305,8 @@ function start() {
       player.resumePendingSeek().then(result => {
         if (result.resumed) { notify('已返回收藏片段'); player.getCurrent()?.media.play?.().catch(() => notify('已定位收藏片段，点击播放继续')); }
       }).catch(fail);
+      // A sitting that navigated to another video continues on the page it asked for.
+      notebook.resumeSession().catch(fail);
       try {
         if (!local?.getItem('bili_caption_welcome_v240')) {
           notify(`v${VERSION} 已就绪 · S 收藏，B 打开复习本；帮助中可查看全部操作`, { duration: 6000 });
@@ -379,12 +349,12 @@ function start() {
   window.addEventListener('blur', () => { peek = false; cancelDrag(); paint(); }, { signal: events.signal });
   document.addEventListener('fullscreenchange', fullscreen, { signal: events.signal });
   window.addEventListener('resize', schedulePaint, { passive: true, signal: events.signal });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && snapshot) { config = settings.get(configSeries); paint(); } }, { signal: events.signal });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && snapshot) { config = settings.get(configSeries); paint(); refreshDue(); } }, { signal: events.signal });
   window.addEventListener('pagehide', () => { saveGeometry(); }, { signal: events.signal });
   window.addEventListener('unload', () => {
     unsubscribe(); player.dispose(); review.dispose(); notebook.dispose(); settings.dispose(); repo.close();
     events.abort(); mountAbort?.abort(); resizeObserver?.disconnect();
-    for (const timer of [hideTimer, wheelTimer, saveTimer, toastTimer]) clearTimeout(timer);
+    for (const timer of [hideTimer, wheelTimer, saveTimer, toastTimer, dueTimer]) clearTimeout(timer);
     if (frame != null) cancelAnimationFrame(frame);
   }, { once: true });
 }

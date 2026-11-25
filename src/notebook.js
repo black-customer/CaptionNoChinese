@@ -1,6 +1,27 @@
+import { isDue, orderSession, schedule } from './schedule.js';
+import { getDeepActiveElement, isEditableEvent } from './editable.js';
+
 const PAGE_SIZE = 30;
 const SAVE_DELAY = 550;
-const REVIEW_STATES = [['new', '待复习'], ['learning', '仍不会'], ['mastered', '已掌握']];
+const SESSION_KEY = 'bili_caption_review_session';
+/** A cross-video navigation reopens the sitting only if the next page loads within this window. */
+const RESUME_WINDOW = 2 * 60 * 1000;
+const RATING_CHOICES = [['again', '没听懂'], ['hard', '费劲'], ['good', '听懂了']];
+const REVIEW_STATES = [['new', '待复习'], ['learning', '学习中'], ['mastered', '已掌握']];
+
+function validSession(value) {
+    return Boolean(value) && Array.isArray(value.queue) && value.queue.length <= 10000 && value.queue.every(id => typeof id === 'string') &&
+        Number.isInteger(value.index) && value.index >= 0 && value.index <= value.queue.length &&
+        ['again', 'hard', 'good'].every(key => Number.isInteger(value[key]) && value[key] >= 0) &&
+        (value.pending === null || value.pending === 'listen' || value.pending === 'loop');
+}
+
+function readSession(store) {
+    try {
+        const value = JSON.parse(store?.getItem(SESSION_KEY) || 'null');
+        return validSession(value) ? value : null;
+    } catch { return null; }
+}
 
 function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -68,7 +89,7 @@ function blobDataUrl(blob) {
 }
 
 /** Non-modal notebook. The caller owns attachment and fullscreen placement. */
-export function createNotebook({ repo, player, notify = () => {}, version = '2.4.1', onChange = () => {}, onLoop, onHelp, onSettings, getLeadIn = () => 3 }) {
+export function createNotebook({ repo, player, notify = () => {}, version = '2.5.0', onChange = () => {}, onLoop, onHelp, onSettings, getLeadIn = () => 3, getBatchSize = () => 20, sessionStorage = null, now = Date.now }) {
     let opened = false;
     let disposed = false;
     let offset = 0;
@@ -80,6 +101,14 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
     let showAnswers = true;
     let importData = null;
     let undoNote = null;
+    let session = readSession(sessionStorage);
+    let dueCount = 0;
+    let sessionGeneration = 0;
+    let sessionBusy = false;
+    let playBusy = false;
+    let revealed = false;
+    let currentNote = null;
+    let revealTarget = null;
     const drafts = new Map();
     const controls = new Map();
     const imageUrls = new Set();
@@ -115,7 +144,7 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
     searchInput.autocomplete = 'off';
     searchInput.setAttribute('aria-label', '搜索收藏');
     const scopeSelect = select([['current', '当前剧集'], ['all', '全部收藏']], '收藏范围');
-    const statusSelect = select([['all', '全部状态'], ...REVIEW_STATES], '复习状态');
+    const statusSelect = select([['all', '全部状态'], ['due', '今日到期'], ...REVIEW_STATES], '复习状态');
     const filterRow = node('div', 'bcm-filter-row');
     filterRow.append(field('范围', scopeSelect), field('状态', statusSelect));
     const revealButton = button('隐藏笔记答案', async () => {
@@ -131,6 +160,12 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
     const summaryRow = node('div', 'bcm-summary-row');
     summaryRow.append(resultSummary, revealButton);
     filters.append(field('搜索', searchInput), filterRow, summaryRow);
+    const dueBar = node('div', 'bcm-due-bar');
+    const dueText = node('p', 'bcm-due-text');
+    dueText.setAttribute('role', 'status');
+    const startButton = button('开始复习', () => startSession(), 'bcm-button-primary');
+    dueBar.append(dueText, startButton);
+    dueBar.hidden = true;
 
     const notices = node('div', 'bcm-notices');
     notices.setAttribute('aria-live', 'polite');
@@ -184,7 +219,17 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
     pagination.append(previousButton, pageLabel, nextButton);
     pagination.hidden = true;
     const footer = node('p', 'bcm-storage-note', '收藏保存在本浏览器中。清理站点数据前，请先备份。');
-    scroll.append(filters, notices, undoRegion, importRegion, list, pagination, footer);
+    // A sitting replaces the list: one card at a time, answer hidden until revealed.
+    const sessionView = node('section', 'bcm-session');
+    sessionView.setAttribute('aria-label', '复习会话');
+    sessionView.hidden = true;
+    const sessionTop = node('div', 'bcm-session-top');
+    const progressText = node('p', 'bcm-session-progress');
+    progressText.setAttribute('role', 'status');
+    sessionTop.append(progressText, button('结束复习', () => leaveSession(), 'bcm-button-quiet'));
+    const sessionCard = node('article', 'bcm-session-card');
+    sessionView.append(sessionTop, sessionCard);
+    scroll.append(dueBar, filters, notices, undoRegion, importRegion, sessionView, list, pagination, footer);
     const fileInput = node('input');
     fileInput.type = 'file';
     fileInput.accept = '.json,application/json';
@@ -281,29 +326,55 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
         imageUrls.clear();
     }
 
+    function imageSource(note) {
+        if (note?.imageBlob instanceof Blob && /^image\/(jpeg|png|webp|gif|avif)$/i.test(note.imageBlob.type)) {
+            const url = URL.createObjectURL(note.imageBlob);
+            imageUrls.add(url);
+            return url;
+        }
+        return /^data:image\/(jpeg|png|webp|gif|avif);base64,/i.test(note?.imageUrl || '') ? note.imageUrl : null;
+    }
+
+    function showImage(container, note) {
+        const src = imageSource(note);
+        if (!src) { container.textContent = '图片不可用，仍可回听原视频。'; return; }
+        const image = node('img', 'bcm-note-image');
+        image.alt = `${note.epTitle || note.seriesTitle || '视频'} ${note.timeStr || timeLabel(note.time)} 的收藏画面`;
+        image.decoding = 'async';
+        image.addEventListener('error', () => { container.textContent = '图片无法显示，仍可回听原视频。'; });
+        image.src = src;
+        container.replaceChildren(image);
+    }
+
     async function loadImage(container, id, generation) {
         if (disposed || generation !== renderGeneration || container.dataset.loaded) return;
         container.dataset.loaded = 'true';
         try {
             const note = await repo.get(id);
             if (disposed || generation !== renderGeneration || !container.isConnected) return;
-            let src = null;
-            if (note?.imageBlob instanceof Blob && /^image\/(jpeg|png|webp|gif|avif)$/i.test(note.imageBlob.type)) {
-                src = URL.createObjectURL(note.imageBlob);
-                imageUrls.add(src);
-            } else if (/^data:image\/(jpeg|png|webp|gif|avif);base64,/i.test(note?.imageUrl || '')) {
-                src = note.imageUrl;
-            }
-            if (!src) throw new Error('图片不可用');
-            const image = node('img', 'bcm-note-image');
-            image.alt = `${note.epTitle || note.seriesTitle || '视频'} ${note.timeStr || timeLabel(note.time)} 的收藏画面`;
-            image.decoding = 'async';
-            image.addEventListener('error', () => { container.textContent = '图片无法显示，仍可回听原视频。'; });
-            image.src = src;
-            container.replaceChildren(image);
+            showImage(container, note);
         } catch {
             if (!disposed && generation === renderGeneration) container.textContent = '图片无法加载，仍可回听原视频。';
         }
+    }
+
+    function sameSource(note) {
+        const sourceId = note?.source?.sourceId;
+        return Boolean(sourceId) && player.getCurrent?.()?.identity?.source?.sourceId === sourceId;
+    }
+
+    /** Seek and play while the source is open; resolves true once a navigation to it has started. */
+    async function listen(note) {
+        const result = await player.seek(note, { leadIn: leadInFor(note) });
+        if (!result?.navigated) {
+            const current = player.getCurrent?.();
+            if (!current?.sourceReady || (note.source?.sourceId && current.identity?.source?.sourceId !== note.source.sourceId)) {
+                throw new Error('视频正在切换，请画面就绪后重试');
+            }
+            if (typeof current.media?.play !== 'function') throw new Error('播放器暂时无法播放，请手动继续');
+            await current.media.play();
+        }
+        return Boolean(result?.navigated);
     }
 
     async function playNote(note, control, loop = false) {
@@ -314,17 +385,7 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
                 return;
             }
             if (loop && onLoop) await onLoop(note);
-            else {
-                const result = await player.seek(note, { leadIn: leadInFor(note) });
-                if (!result?.navigated) {
-                    const current = player.getCurrent?.();
-                    if (!current?.sourceReady || (note.source?.sourceId && current.identity?.source?.sourceId !== note.source.sourceId)) {
-                        throw new Error('视频正在切换，请画面就绪后重试');
-                    }
-                    if (typeof current.media?.play !== 'function') throw new Error('播放器暂时无法播放，请手动继续');
-                    await current.media.play();
-                }
-            }
+            else await listen(note);
         } catch (error) {
             const message = `回听失败：${readableError(error)}`;
             setNotice(message, true);
@@ -387,7 +448,9 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
         const reviewSelect = select(REVIEW_STATES, '这条收藏的复习状态');
         reviewSelect.value = data.reviewState || 'new';
         reviewSelect.addEventListener('change', async () => {
-            queueDraft(note.id, { reviewState: reviewSelect.value });
+            const state = reviewSelect.value;
+            // A manual status overrides the schedule: whatever is not mastered is wanted now.
+            queueDraft(note.id, state === 'mastered' ? { reviewState: state } : { reviewState: state, dueAt: now() });
             await saveDraft(note.id);
         });
         const bottom = node('div', 'bcm-note-bottom');
@@ -420,6 +483,8 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
         try {
             if (typeof repo.ready === 'function') await repo.ready();
             else await repo.ready;
+            // A sitting owns the panel; the list is redrawn when it ends.
+            if (sessionActive()) { updateDue(scopeSelect.value === 'current' && !seriesId ? undefined : seriesId, generation); return; }
             const result = scopeSelect.value === 'current' && !seriesId
                 ? { notes: [], total: 0 }
                 : await repo.list({ seriesId, query: searchInput.value.trim(), status: statusSelect.value, offset, limit: PAGE_SIZE });
@@ -438,8 +503,9 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
                 const empty = node('div', 'bcm-empty');
                 const filtered = Boolean(searchInput.value.trim()) || statusSelect.value !== 'all';
                 const noPlayer = scopeSelect.value === 'current' && !seriesId;
-                empty.append(node('h3', '', noPlayer ? '当前没有可用的视频' : filtered ? '没有符合条件的收藏' : '把想再听的瞬间留下来'));
-                empty.append(node('p', '', noPlayer ? '切换到“全部收藏”查看历史记录，或打开 B 站视频。' : filtered ? '试试其他关键词，或将复习状态设为“全部状态”。' : '播放时按 Alt + S 收藏画面；之后可从这里回听、做笔记。'));
+                const noDue = statusSelect.value === 'due' && !searchInput.value.trim();
+                empty.append(node('h3', '', noPlayer ? '当前没有可用的视频' : noDue ? '今天没有到期的收藏' : filtered ? '没有符合条件的收藏' : '把想再听的瞬间留下来'));
+                empty.append(node('p', '', noPlayer ? '切换到“全部收藏”查看历史记录，或打开 B 站视频。' : noDue ? '新收藏会立即到期；复习过的收藏按间隔再次出现。' : filtered ? '试试其他关键词，或将复习状态设为“全部状态”。' : '播放时按 Alt + S 收藏画面；之后可从这里回听、做笔记。'));
                 fragment.append(empty);
             }
             list.replaceChildren(fragment);
@@ -448,6 +514,7 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
             previousButton.disabled = offset === 0;
             nextButton.disabled = offset + PAGE_SIZE >= total;
             pagination.hidden = total <= PAGE_SIZE;
+            updateDue(scopeSelect.value === 'current' && !seriesId ? undefined : seriesId, generation);
         } catch (error) {
             if (generation === refreshGeneration) {
                 resultSummary.textContent = '收藏加载失败';
@@ -456,6 +523,321 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
             }
         } finally {
             if (generation === refreshGeneration) list.removeAttribute('aria-busy');
+        }
+    }
+
+    function saveSession() {
+        try { sessionStorage?.setItem(SESSION_KEY, JSON.stringify(session)); } catch { /* Without tab storage the sitting still runs, but cannot continue after a cross-video navigation. */ }
+    }
+
+    function clearSession() {
+        session = null;
+        try { sessionStorage?.removeItem(SESSION_KEY); } catch { /* The discarded sitting is never read again. */ }
+    }
+
+    function remaining() {
+        return session ? session.queue.length - session.index : 0;
+    }
+
+    function sessionActive() {
+        return opened && !sessionView.hidden;
+    }
+
+    function batchSize() {
+        const value = Number(getBatchSize());
+        return Number.isFinite(value) ? Math.max(1, Math.min(200, Math.round(value))) : 20;
+    }
+
+    function renderDueBar() {
+        const left = remaining();
+        if (left > 0) {
+            dueText.textContent = `上次复习还剩 ${left} 条`;
+            startButton.textContent = '继续复习';
+        } else if (dueCount > 0) {
+            dueText.textContent = `有 ${dueCount} 条收藏到期，该复习了`;
+            startButton.textContent = '开始复习';
+        }
+        dueBar.hidden = left === 0 && dueCount === 0;
+        startButton.hidden = false;
+    }
+
+    async function updateDue(seriesId, generation) {
+        let failed = false;
+        try {
+            const due = seriesId === undefined ? 0 : await repo.countDue(seriesId, now());
+            if (disposed || generation !== refreshGeneration) return;
+            dueCount = due;
+        } catch {
+            if (disposed || generation !== refreshGeneration) return;
+            dueCount = 0;
+            failed = true;
+        }
+        renderDueBar();
+        if (failed) {
+            dueText.textContent = '无法读取到期的收藏';
+            dueBar.hidden = false;
+            startButton.hidden = true;
+        }
+    }
+
+    /** Re-read the due count without redrawing the list or disturbing an edit in progress. */
+    async function refreshDue() {
+        if (disposed || !opened) return;
+        await updateDue(scopeSelect.value === 'current' ? player.getCurrent?.()?.identity?.seriesId || undefined : null, refreshGeneration);
+    }
+
+    /** Begin a sitting of due cards, or continue one that was left unfinished. */
+    async function startSession() {
+        if (sessionBusy || disposed) return;
+        if (remaining() > 0) { await enterSession(); return; }
+        sessionBusy = true;
+        startButton.disabled = true;
+        try {
+            if (!(await flushDrafts())) throw new Error('仍有未保存笔记，请先重试保存');
+            const seriesId = scopeSelect.value === 'current' ? player.getCurrent?.()?.identity?.seriesId : null;
+            if (scopeSelect.value === 'current' && !seriesId) throw new Error('当前没有可用的视频，请选择全部收藏');
+            const due = [];
+            let sessionOffset = 0;
+            for (;;) {
+                const batch = await repo.list({ seriesId, status: 'due', offset: sessionOffset, limit: 500 });
+                due.push(...batch.notes);
+                sessionOffset += batch.notes.length;
+                if (!batch.notes.length || sessionOffset >= batch.total) break;
+            }
+            if (disposed) return;
+            if (!due.length) {
+                setNotice('目前没有到期的收藏。');
+                return;
+            }
+            session = {
+                queue: orderSession(due, { currentSourceId: player.getCurrent?.()?.identity?.source?.sourceId, limit: batchSize() }).map(note => note.id),
+                index: 0, again: 0, hard: 0, good: 0, pending: null, pendingAt: 0
+            };
+            saveSession();
+            await enterSession();
+        } catch (error) {
+            if (!disposed) setNotice(`无法开始复习：${readableError(error)}`, true);
+        } finally { sessionBusy = false; startButton.disabled = false; }
+    }
+
+    async function enterSession() {
+        sessionView.hidden = false;
+        for (const item of [dueBar, filters, list, pagination, footer]) item.hidden = true;
+        scroll.scrollTop = 0;
+        return showSessionCard();
+    }
+
+    function showListView() {
+        sessionGeneration += 1;
+        currentNote = null;
+        revealTarget = null;
+        sessionView.hidden = true;
+        for (const item of [dueBar, filters, list, footer]) item.hidden = false;
+    }
+
+    function leaveSession() {
+        showListView();
+        return refresh();
+    }
+
+    /** Show the next card, skipping cards removed or reviewed elsewhere. Resolves with the card shown. */
+    async function showSessionCard() {
+        const generation = ++sessionGeneration;
+        revealed = false;
+        currentNote = null;
+        revealTarget = null;
+        clearImages();
+        while (session && session.index < session.queue.length) {
+            const id = session.queue[session.index];
+            progressText.textContent = `还剩 ${session.queue.length - session.index} 条`;
+            sessionCard.replaceChildren(node('p', 'bcm-session-hint', '正在载入…'));
+            let note;
+            try { note = await repo.get(id); }
+            catch (error) {
+                if (generation !== sessionGeneration) return null;
+                sessionCard.replaceChildren(node('p', 'bcm-session-hint', `无法读取这条收藏：${readableError(error)}`), button('重试', () => showSessionCard()));
+                return null;
+            }
+            if (generation !== sessionGeneration) return null;
+            if (note && isDue(note, now())) {
+                currentNote = note;
+                renderSessionCard(note);
+                scroll.scrollTop = 0;
+                return note;
+            }
+            session.index += 1;
+            saveSession();
+        }
+        if (generation === sessionGeneration) finishSession();
+        return null;
+    }
+
+    function renderSessionCard(note) {
+        const title = node('h3', 'bcm-session-title', `${note.epTitle || note.seriesTitle || '未命名视频'} · ${note.timeStr || timeLabel(note.time)}`);
+        title.tabIndex = -1;
+        const here = sameSource(note);
+        const hint = node('p', 'bcm-session-hint', here ? '先听一遍，回想意思，再看答案。' : '这条收藏在其他视频里。回听会跳转过去，页面就绪后自动继续复习。');
+        if (here) hint.append(node('span', 'bcm-nowrap', '空格显示答案，1 / 2 / 3 自评。'));
+        const playback = node('div', 'bcm-playback-row');
+        const playButton = button('回听', () => sessionPlay(note, false, playButton), 'bcm-button-primary bcm-play-button');
+        playButton.title = `从收藏时间前 ${leadInFor(note)} 秒开始回听`;
+        playback.append(playButton);
+        if (onLoop) playback.append(button('片段循环', () => sessionPlay(note, true)));
+        const answer = node('div', 'bcm-session-answer');
+        answer.hidden = true;
+        if (note.hasImage || note.imageUrl || note.imageBlob) {
+            const container = node('div', 'bcm-image-placeholder', '正在载入场景…');
+            answer.append(container);
+            showImage(container, note);
+        }
+        answer.append(node('p', 'bcm-session-note', note.userNote || '这条收藏没有笔记。'));
+        if (note.tags?.length) answer.append(node('p', 'bcm-session-tags', `标签：${note.tags.join('、')}`));
+        const revealButton = button('显示答案', () => reveal(), 'bcm-button-primary');
+        const ratings = node('div', 'bcm-ratings');
+        ratings.setAttribute('role', 'group');
+        ratings.setAttribute('aria-label', '这次听得怎么样');
+        ratings.hidden = true;
+        // Each choice says when the card comes back, so the ladder is visible without explaining an algorithm.
+        const upcoming = schedule(note, 'good');
+        const hints = { again: '稍后再来', hard: '明天再来', good: upcoming.reviewState === 'mastered' ? '记为已掌握' : `${upcoming.interval} 天后再来` };
+        RATING_CHOICES.forEach(([rating, label], position) => {
+            const choice = button('', () => rate(rating), 'bcm-rating');
+            choice.dataset.rating = rating;
+            choice.setAttribute('aria-label', `${label}，${hints[rating]}`);
+            const name = node('span', 'bcm-rating-label');
+            name.append(node('kbd', '', String(position + 1)), node('span', '', label));
+            choice.append(name, node('small', '', hints[rating]));
+            ratings.append(choice);
+        });
+        sessionCard.replaceChildren(title, hint, playback, revealButton, answer, ratings);
+        revealTarget = { title, revealButton, answer, ratings };
+        title.focus({ preventScroll: true });
+    }
+
+    function reveal() {
+        if (!sessionActive() || revealed || !revealTarget) return;
+        revealed = true;
+        revealTarget.revealButton.hidden = true;
+        revealTarget.answer.hidden = false;
+        revealTarget.ratings.hidden = false;
+    }
+
+    async function rate(rating) {
+        if (!sessionActive() || !revealed || sessionBusy || !currentNote) return;
+        const id = session.queue[session.index];
+        const choices = revealTarget.ratings.children;
+        sessionBusy = true;
+        for (const choice of choices) choice.disabled = true;
+        try {
+            await repo.review(id, rating);
+            if (session?.queue[session.index] !== id) return;
+            session[rating] += 1;
+            session.index += 1;
+            // A card that was not understood comes back at the end of this sitting.
+            if (rating === 'again') session.queue.push(id);
+            saveSession();
+            signalChange();
+            await showSessionCard();
+        } catch (error) {
+            setNotice(`自评没有保存：${readableError(error)}`, true);
+            for (const choice of choices) choice.disabled = false;
+        } finally { sessionBusy = false; }
+    }
+
+    function finishSession() {
+        const result = session;
+        clearSession();
+        clearImages();
+        revealed = false;
+        progressText.textContent = '本轮结束';
+        const actions = node('div', 'bcm-playback-row');
+        actions.append(button('再来一组', () => restartSession(), 'bcm-button-primary'), button('返回复习本', () => leaveSession()));
+        const title = node('h3', 'bcm-session-title', '本轮复习完成');
+        title.tabIndex = -1;
+        sessionCard.replaceChildren(
+            title,
+            node('p', 'bcm-session-hint', `复习了 ${result.queue.length - result.again} 条收藏：听懂了 ${result.good}，费劲 ${result.hard}，没听懂 ${result.again}。`),
+            node('p', 'bcm-session-hint', '听懂的收藏会在 1、3、7、15、31 天后依次再出现。到期时，播放器按钮和复习本顶部会提示。'),
+            actions
+        );
+        title.focus({ preventScroll: true });
+    }
+
+    async function restartSession() {
+        showListView();
+        await refresh();
+        await startSession();
+    }
+
+    async function sessionPlay(note, loop, control = null) {
+        if (playBusy || !note) return;
+        playBusy = true;
+        if (control) control.disabled = true;
+        try {
+            if (!(await flushDrafts())) {
+                setNotice('笔记尚未保存成功。请先重试保存，再回听，避免切换视频时丢失草稿。', true);
+                return;
+            }
+            // Remember why the page is left, so the next one can reopen this card and continue.
+            if (!sameSource(note)) { session.pending = loop ? 'loop' : 'listen'; session.pendingAt = now(); saveSession(); }
+            const navigated = loop && onLoop ? Boolean((await onLoop(note))?.navigated) : await listen(note);
+            if (!navigated) dropPending();
+        } catch (error) {
+            dropPending();
+            const message = `回听失败：${readableError(error)}`;
+            setNotice(message, true);
+            notify(message, { kind: 'error' });
+        } finally {
+            playBusy = false;
+            if (control) control.disabled = false;
+            // Space reveals the answer; left on a playback button it would replay the clip instead.
+            if (currentNote === note) revealTarget?.title.focus({ preventScroll: true });
+        }
+    }
+
+    function dropPending() {
+        if (!session?.pending) return;
+        session.pending = null;
+        saveSession();
+    }
+
+    /** After this sitting's own cross-video navigation, reopen the same card and continue. */
+    async function resumeSession() {
+        if (disposed || !session?.pending) return false;
+        const action = session.pending;
+        const expired = now() - session.pendingAt > RESUME_WINDOW;
+        session.pending = null;
+        saveSession();
+        if (expired) return false;
+        await open();
+        const note = await enterSession();
+        if (action === 'loop' && note && sameSource(note)) await sessionPlay(note, true);
+        return true;
+    }
+
+    function isInteractiveControl(target) {
+        if (!target) return false;
+        const tag = (target.tagName || '').toLowerCase();
+        return tag === 'button' || tag === 'a' || Boolean(target.closest?.('button, a'));
+    }
+
+    function insideOverlayPanel(target) {
+        return Boolean(target?.closest?.('.bcm-panel'));
+    }
+
+    function onSessionKey(event) {
+        if (!sessionActive() || event.isComposing || event.repeat || event.ctrlKey || event.metaKey || event.altKey || isEditableEvent(event)) return;
+        const deepActive = getDeepActiveElement();
+        if (insideOverlayPanel(event.target) || insideOverlayPanel(deepActive)) return;
+        const rating = RATING_CHOICES[Number(event.key) - 1];
+        if (revealed && rating) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            void rate(rating[0]);
+        } else if (event.key === ' ' && !revealed && !isInteractiveControl(event.target) && !isInteractiveControl(deepActive)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            reveal();
         }
     }
 
@@ -602,6 +984,7 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
         event.returnValue = '';
     }
     window.addEventListener('beforeunload', protectDrafts);
+    window.addEventListener('keydown', onSessionKey, true);
 
     async function open() {
         if (disposed) return;
@@ -620,6 +1003,8 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
         opened = false;
         refreshGeneration += 1;
         renderGeneration += 1;
+        // An unfinished sitting stays stored and is offered again on the next open.
+        showListView();
         clearImages();
         element.hidden = true;
         element.inert = true;
@@ -632,13 +1017,15 @@ export function createNotebook({ repo, player, notify = () => {}, version = '2.4
         opened = false;
         refreshGeneration += 1;
         renderGeneration += 1;
+        sessionGeneration += 1;
         clearTimeout(searchTimer);
         window.removeEventListener('beforeunload', protectDrafts);
+        window.removeEventListener('keydown', onSessionKey, true);
         for (const draft of drafts.values()) clearTimeout(draft.timer);
         clearImages();
         controls.clear();
         element.remove();
     }
 
-    return { element, open, close, toggle: () => opened ? close() : open(), refresh, dispose, isOpen: () => opened, flushDrafts };
+    return { element, open, close, toggle: () => opened ? close() : open(), refresh, refreshDue, resumeSession, dispose, isOpen: () => opened, flushDrafts };
 }

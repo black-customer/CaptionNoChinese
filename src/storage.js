@@ -1,3 +1,5 @@
+import { RATINGS, compareDue, isDue, schedule } from './schedule.js';
+
 const DB_NAME = 'BiliCaptionStudyDB';
 const DB_VERSION = 2;
 const LEGACY_KEY = 'bili_caption_notes_v200';
@@ -37,6 +39,16 @@ function text(value, fallback = '', max = 20000, label = '文本') {
 function number(value, fallback, label, max = Number.MAX_SAFE_INTEGER) {
     if (value === undefined) return fallback;
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > max) fail(`${label}不是有效的非负数字`);
+    return value;
+}
+
+function optionalTime(value, label) {
+    return value === undefined || value === null ? null : number(value, null, label);
+}
+
+function counter(value, label) {
+    if (value === undefined || value === null) return 0;
+    if (!Number.isInteger(value) || value < 0 || value > 1000000) fail(`${label}必须是不超过 1000000 的非负整数`);
     return value;
 }
 
@@ -91,6 +103,8 @@ function splitNote(input, { legacy = false, seriesId } = {}) {
         if (typeof tag !== 'string') fail('每个标签都必须是文本');
         return text(tag, '', 100, '标签').trim();
     }).filter(Boolean))];
+    // Cards from before scheduled review have no schedule: they are due now and start at the first step.
+    const interval = input.interval === undefined || input.interval === null ? 0 : number(input.interval, 0, '复习间隔', 36500);
     let media = null;
     if (input.imageBlob !== undefined && input.imageBlob !== null) {
         if (!(input.imageBlob instanceof Blob) || !IMAGE_TYPES.has(input.imageBlob.type) || input.imageBlob.size === 0) fail('截图 Blob 必须是 JPEG、PNG 或 WebP 图片');
@@ -111,6 +125,11 @@ function splitNote(input, { legacy = false, seriesId } = {}) {
         userNote: text(input.userNote, '', 100000, '笔记'),
         tags: cleanedTags,
         reviewState,
+        dueAt: optionalTime(input.dueAt, '下次复习时间'),
+        interval,
+        reps: counter(input.reps, '复习次数'),
+        lapses: counter(input.lapses, '忘记次数'),
+        lastReviewedAt: optionalTime(input.lastReviewedAt, '最近复习时间'),
         createdAt,
         updatedAt: number(input.updatedAt, createdAt, '修改时间'),
         hasImage: Boolean(media)
@@ -295,29 +314,54 @@ export function createRepository(options = {}) {
         return readiness;
     }
 
-    async function list({ seriesId = null, query = '', status = 'all', offset = 0, limit = 30 } = {}) {
+    async function list({ seriesId = null, query = '', status = 'all', offset = 0, limit = 30, now = Date.now() } = {}) {
         await ready();
         if (seriesId !== null) text(seriesId, '', 300, '剧集 ID');
-        if (status !== 'all' && !REVIEW_STATES.has(status)) fail('复习筛选状态无效');
+        if (status !== 'all' && status !== 'due' && !REVIEW_STATES.has(status)) fail('复习筛选状态无效');
         if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) fail('分页参数无效，单页最多 500 张卡片');
         const needle = text(query, '', 1000, '搜索词').trim().toLocaleLowerCase();
+        const due = status === 'due' ? number(now, Date.now(), '当前时间') : null;
         return transaction(['notes'], 'readonly', (tx, set) => {
             const page = [];
+            // Due cards are ordered by due time rather than by creation, so the result is gathered before slicing.
+            const found = due === null ? null : [];
             let total = 0;
             const request = tx.objectStore('notes').index('by_created').openCursor(null, 'prev');
             request.onsuccess = () => {
                 const cursor = request.result;
-                if (!cursor) { set({ notes: page, total }); return; }
+                if (!cursor) {
+                    if (found) set({ notes: found.sort(compareDue).slice(offset, offset + limit), total });
+                    else set({ notes: page, total });
+                    return;
+                }
                 const note = cursor.value;
                 if ((seriesId === null || note.seriesId === seriesId) &&
-                    (status === 'all' || note.reviewState === status) &&
+                    (status === 'all' || (found ? isDue(note, due) : note.reviewState === status)) &&
                     (!needle || [note.seriesTitle, note.epTitle, note.userNote, ...(note.tags || [])].join('\n').toLocaleLowerCase().includes(needle))) {
-                    if (total >= offset && page.length < limit) page.push(note);
+                    if (found) found.push(note);
+                    else if (total >= offset && page.length < limit) page.push(note);
                     total++;
                 }
                 cursor.continue();
             };
         });
+    }
+
+    async function countDue(seriesId = null, now = Date.now()) {
+        await ready();
+        if (seriesId !== null) text(seriesId, '', 300, '剧集 ID');
+        const due = number(now, Date.now(), '当前时间');
+        let total = 0;
+        return transaction(['notes'], 'readonly', (tx, set) => {
+            const notes = tx.objectStore('notes');
+            const request = (seriesId === null ? notes : notes.index('by_series')).openCursor(seriesId);
+            request.onsuccess = () => {
+                const cursor = request.result;
+                if (!cursor) { set(total); return; }
+                if (isDue(cursor.value, due)) total++;
+                cursor.continue();
+            };
+        }, '读取待复习数量失败');
     }
 
     async function get(id) {
@@ -347,33 +391,45 @@ export function createRepository(options = {}) {
         }, '保存卡片失败');
     }
 
+    /** Read, change and write one card in a single transaction; `changes` receives the stored record. */
+    function applyPatch(tx, id, changes, at, set, abort) {
+        const notes = tx.objectStore('notes');
+        const media = tx.objectStore('media');
+        const request = notes.get(id);
+        request.onsuccess = () => {
+            if (!request.result) { abort(new Error('卡片不存在，可能已被删除')); return; }
+            const image = media.get(id);
+            image.onsuccess = () => {
+                try {
+                    const patch = { ...changes(request.result), id, updatedAt: at };
+                    const { id: ignored, ...oldImage } = image.result || {};
+                    const replacingImage = Object.hasOwn(patch, 'imageBlob') || Object.hasOwn(patch, 'imageUrl');
+                    const entry = splitNote({ ...request.result, ...(replacingImage ? {} : oldImage), ...patch });
+                    notes.put(entry.note);
+                    if (entry.media) media.put(entry.media);
+                    else media.delete(id);
+                    const { id: ignoredAgain, ...newImage } = entry.media || {};
+                    set({ ...entry.note, ...newImage });
+                } catch (error) { abort(error); }
+            };
+        };
+    }
+
     async function update(id, patch) {
         if (!patch || typeof patch !== 'object' || Array.isArray(patch)) fail('卡片修改内容无效');
         checkObject(patch, '卡片修改');
         if (patch.id !== undefined && patch.id !== id) fail('不能修改卡片 ID');
         patch = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
         await ready();
-        return transaction(['notes', 'media'], 'readwrite', (tx, set, abort) => {
-            const notes = tx.objectStore('notes');
-            const media = tx.objectStore('media');
-            const request = notes.get(id);
-            request.onsuccess = () => {
-                if (!request.result) { abort(new Error('卡片不存在，可能已被删除')); return; }
-                const image = media.get(id);
-                image.onsuccess = () => {
-                    try {
-                        const { id: ignored, ...oldImage } = image.result || {};
-                        const replacingImage = Object.hasOwn(patch, 'imageBlob') || Object.hasOwn(patch, 'imageUrl');
-                        const entry = splitNote({ ...request.result, ...(replacingImage ? {} : oldImage), ...patch, id, updatedAt: Date.now() });
-                        notes.put(entry.note);
-                        if (entry.media) media.put(entry.media);
-                        else media.delete(id);
-                        const { id: ignoredAgain, ...newImage } = entry.media || {};
-                        set({ ...entry.note, ...newImage });
-                    } catch (error) { abort(error); }
-                };
-            };
-        }, '修改卡片失败');
+        return transaction(['notes', 'media'], 'readwrite', (tx, set, abort) => applyPatch(tx, id, () => patch, Date.now(), set, abort), '修改卡片失败');
+    }
+
+    /** Record one self-rating; the next schedule is computed from the stored card. */
+    async function review(id, rating, now = Date.now()) {
+        if (!RATINGS.has(rating)) fail('复习结果无效');
+        const at = number(now, Date.now(), '复习时间');
+        await ready();
+        return transaction(['notes', 'media'], 'readwrite', (tx, set, abort) => applyPatch(tx, id, note => schedule(note, rating, at), at, set, abort), '记录复习失败');
     }
 
     async function remove(id) {
@@ -478,5 +534,5 @@ export function createRepository(options = {}) {
     }
 
     function close() { closed = true; db?.close(); db = null; }
-    return { ready, list, get, save, update, remove, restore, count, exportBackup, previewImport, importBackup, close };
+    return { ready, list, get, save, update, review, remove, restore, count, countDue, exportBackup, previewImport, importBackup, close };
 }

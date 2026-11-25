@@ -22,7 +22,7 @@ test('config defaults are independent snapshots and geometry remains inside the 
     const defaults = store.get('one');
     assert.deepEqual(defaults, {
         enabled: true, left: 15, top: 84, width: 70, height: 7.2, blur: 14, mode: 'blur',
-        singleKeys: true, leadIn: 3, loopBefore: 3, loopAfter: 3, loopCount: 3, loopGap: 0, playbackRate: 1
+        singleKeys: true, leadIn: 3, loopBefore: 3, loopAfter: 3, loopCount: 3, loopGap: 0, playbackRate: 1, reviewBatch: 20
     });
     defaults.left = 0;
     assert.equal(store.get('one').left, 15);
@@ -123,6 +123,7 @@ test('playback and loop numeric settings clamp to supported ranges', () => {
     const store = createConfigStore({ localStorage: memoryStorage() });
     const config = store.patch('one', { blur: 500, leadIn: -3, loopBefore: 90, loopAfter: -2, loopCount: 3.7, loopGap: 900, playbackRate: 10 });
     assert.deepEqual([config.blur, config.leadIn, config.loopBefore, config.loopAfter, config.loopCount, config.loopGap, config.playbackRate], [40, 0, 60, 0, 4, 30, 3]);
+    assert.deepEqual([store.patch('one', { reviewBatch: 500 }).reviewBatch, store.patch('one', { reviewBatch: 1 }).reviewBatch, store.patch('one', { reviewBatch: 12.6 }).reviewBatch], [100, 5, 13]);
 });
 
 test('GM storage takes precedence and writes only one backend', () => {

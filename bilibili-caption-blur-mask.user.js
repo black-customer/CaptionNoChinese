@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 剧集双语字幕羽化遮罩与生词本 (看剧学英语)
 // @namespace    https://github.com/CaptionNoChinese
-// @version      2.4.1
+// @version      2.5.0
 // @description  中文字幕遮罩、可靠场景收藏、跨集回听、片段循环、搜索复习与本地备份恢复。
 // @author       black-customer
 // @homepageURL  https://github.com/black-customer/CaptionNoChinese
@@ -17,6 +17,63 @@
 // @license      MIT
 // ==/UserScript==
 (() => {
+  // src/schedule.js
+  var DAY = 24 * 60 * 60 * 1e3;
+  var ROLLOVER_HOUR = 4;
+  var RATINGS = /* @__PURE__ */ new Set(["again", "hard", "good"]);
+  var STEPS = Object.freeze([1, 3, 7, 15, 31]);
+  function dayStart(now = Date.now()) {
+    const date = new Date(now);
+    date.setHours(ROLLOVER_HOUR, 0, 0, 0);
+    if (date.getTime() > now) date.setDate(date.getDate() - 1);
+    return date.getTime();
+  }
+  function daysFrom(start2, days) {
+    const date = new Date(start2);
+    date.setDate(date.getDate() + days);
+    return date.getTime();
+  }
+  function nextRollover(now = Date.now()) {
+    return daysFrom(dayStart(now), 1);
+  }
+  function isDue(note, now = Date.now()) {
+    return note?.reviewState !== "mastered" && !(note.dueAt > now);
+  }
+  function dueKey(note) {
+    return Number.isFinite(note.dueAt) ? note.dueAt : Infinity;
+  }
+  function compareDue(left, right) {
+    const difference = dueKey(left) - dueKey(right);
+    return difference === 0 || Number.isNaN(difference) ? left.createdAt - right.createdAt : difference;
+  }
+  function schedule(note, rating, now = Date.now()) {
+    if (!RATINGS.has(rating)) throw new Error("复习结果无效");
+    const step = STEPS.indexOf(note.interval);
+    const base = { reps: (note.reps || 0) + 1, lastReviewedAt: now, reviewState: "learning" };
+    if (rating === "again") return { ...base, lapses: (note.lapses || 0) + 1, interval: 0, dueAt: now };
+    if (rating === "hard") return { ...base, interval: step > 0 ? STEPS[step - 1] : 0, dueAt: nextRollover(now) };
+    if (step === STEPS.length - 1) return { ...base, reviewState: "mastered", dueAt: null };
+    const interval = STEPS[step + 1];
+    return { ...base, interval, dueAt: daysFrom(dayStart(now), interval) };
+  }
+  function orderSession(notes, { currentSourceId = null, limit = Infinity } = {}) {
+    const groups = /* @__PURE__ */ new Map();
+    for (const note of notes) {
+      const sourceId = note.source?.sourceId || "";
+      if (!groups.has(sourceId)) groups.set(sourceId, []);
+      groups.get(sourceId).push(note);
+    }
+    const position = (group) => {
+      const sourceId = group[0].source?.sourceId || "";
+      return sourceId === currentSourceId ? -Infinity : dueKey(group[0]);
+    };
+    const ordered = [...groups.values()].sort((left, right) => {
+      const difference = position(left) - position(right);
+      return Number.isNaN(difference) ? compareDue(left[0], right[0]) : difference;
+    });
+    return ordered.flatMap((group) => group.sort(compareDue)).slice(0, limit);
+  }
+
   // src/storage.js
   var DB_NAME = "BiliCaptionStudyDB";
   var DB_VERSION = 2;
@@ -55,6 +112,14 @@
   function number(value, fallback, label, max = Number.MAX_SAFE_INTEGER) {
     if (value === void 0) return fallback;
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > max) fail(`${label}不是有效的非负数字`);
+    return value;
+  }
+  function optionalTime(value, label) {
+    return value === void 0 || value === null ? null : number(value, null, label);
+  }
+  function counter(value, label) {
+    if (value === void 0 || value === null) return 0;
+    if (!Number.isInteger(value) || value < 0 || value > 1e6) fail(`${label}必须是不超过 1000000 的非负整数`);
     return value;
   }
   function normalizeSource(value) {
@@ -108,6 +173,7 @@
       if (typeof tag !== "string") fail("每个标签都必须是文本");
       return text(tag, "", 100, "标签").trim();
     }).filter(Boolean))];
+    const interval = input.interval === void 0 || input.interval === null ? 0 : number(input.interval, 0, "复习间隔", 36500);
     let media = null;
     if (input.imageBlob !== void 0 && input.imageBlob !== null) {
       if (!(input.imageBlob instanceof Blob) || !IMAGE_TYPES.has(input.imageBlob.type) || input.imageBlob.size === 0) fail("截图 Blob 必须是 JPEG、PNG 或 WebP 图片");
@@ -128,6 +194,11 @@
       userNote: text(input.userNote, "", 1e5, "笔记"),
       tags: cleanedTags,
       reviewState,
+      dueAt: optionalTime(input.dueAt, "下次复习时间"),
+      interval,
+      reps: counter(input.reps, "复习次数"),
+      lapses: counter(input.lapses, "忘记次数"),
+      lastReviewedAt: optionalTime(input.lastReviewedAt, "最近复习时间"),
       createdAt,
       updatedAt: number(input.updatedAt, createdAt, "修改时间"),
       hasImage: Boolean(media)
@@ -361,30 +432,53 @@
       });
       return readiness;
     }
-    async function list({ seriesId = null, query = "", status = "all", offset = 0, limit = 30 } = {}) {
+    async function list({ seriesId = null, query = "", status = "all", offset = 0, limit = 30, now = Date.now() } = {}) {
       await ready();
       if (seriesId !== null) text(seriesId, "", 300, "剧集 ID");
-      if (status !== "all" && !REVIEW_STATES.has(status)) fail("复习筛选状态无效");
+      if (status !== "all" && status !== "due" && !REVIEW_STATES.has(status)) fail("复习筛选状态无效");
       if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) fail("分页参数无效，单页最多 500 张卡片");
       const needle = text(query, "", 1e3, "搜索词").trim().toLocaleLowerCase();
+      const due = status === "due" ? number(now, Date.now(), "当前时间") : null;
       return transaction(["notes"], "readonly", (tx, set) => {
         const page = [];
+        const found = due === null ? null : [];
         let total = 0;
         const request = tx.objectStore("notes").index("by_created").openCursor(null, "prev");
         request.onsuccess = () => {
           const cursor = request.result;
           if (!cursor) {
-            set({ notes: page, total });
+            if (found) set({ notes: found.sort(compareDue).slice(offset, offset + limit), total });
+            else set({ notes: page, total });
             return;
           }
           const note = cursor.value;
-          if ((seriesId === null || note.seriesId === seriesId) && (status === "all" || note.reviewState === status) && (!needle || [note.seriesTitle, note.epTitle, note.userNote, ...note.tags || []].join("\n").toLocaleLowerCase().includes(needle))) {
-            if (total >= offset && page.length < limit) page.push(note);
+          if ((seriesId === null || note.seriesId === seriesId) && (status === "all" || (found ? isDue(note, due) : note.reviewState === status)) && (!needle || [note.seriesTitle, note.epTitle, note.userNote, ...note.tags || []].join("\n").toLocaleLowerCase().includes(needle))) {
+            if (found) found.push(note);
+            else if (total >= offset && page.length < limit) page.push(note);
             total++;
           }
           cursor.continue();
         };
       });
+    }
+    async function countDue(seriesId = null, now = Date.now()) {
+      await ready();
+      if (seriesId !== null) text(seriesId, "", 300, "剧集 ID");
+      const due = number(now, Date.now(), "当前时间");
+      let total = 0;
+      return transaction(["notes"], "readonly", (tx, set) => {
+        const notes = tx.objectStore("notes");
+        const request = (seriesId === null ? notes : notes.index("by_series")).openCursor(seriesId);
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            set(total);
+            return;
+          }
+          if (isDue(cursor.value, due)) total++;
+          cursor.continue();
+        };
+      }, "读取待复习数量失败");
     }
     async function get(id) {
       await ready();
@@ -414,38 +508,46 @@
         set({ ...entry.note, ...fields });
       }, "保存卡片失败");
     }
+    function applyPatch(tx, id, changes, at, set, abort) {
+      const notes = tx.objectStore("notes");
+      const media = tx.objectStore("media");
+      const request = notes.get(id);
+      request.onsuccess = () => {
+        if (!request.result) {
+          abort(new Error("卡片不存在，可能已被删除"));
+          return;
+        }
+        const image = media.get(id);
+        image.onsuccess = () => {
+          try {
+            const patch = { ...changes(request.result), id, updatedAt: at };
+            const { id: ignored, ...oldImage } = image.result || {};
+            const replacingImage = Object.hasOwn(patch, "imageBlob") || Object.hasOwn(patch, "imageUrl");
+            const entry = splitNote({ ...request.result, ...replacingImage ? {} : oldImage, ...patch });
+            notes.put(entry.note);
+            if (entry.media) media.put(entry.media);
+            else media.delete(id);
+            const { id: ignoredAgain, ...newImage } = entry.media || {};
+            set({ ...entry.note, ...newImage });
+          } catch (error) {
+            abort(error);
+          }
+        };
+      };
+    }
     async function update(id, patch) {
       if (!patch || typeof patch !== "object" || Array.isArray(patch)) fail("卡片修改内容无效");
       checkObject(patch, "卡片修改");
       if (patch.id !== void 0 && patch.id !== id) fail("不能修改卡片 ID");
       patch = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== void 0));
       await ready();
-      return transaction(["notes", "media"], "readwrite", (tx, set, abort) => {
-        const notes = tx.objectStore("notes");
-        const media = tx.objectStore("media");
-        const request = notes.get(id);
-        request.onsuccess = () => {
-          if (!request.result) {
-            abort(new Error("卡片不存在，可能已被删除"));
-            return;
-          }
-          const image = media.get(id);
-          image.onsuccess = () => {
-            try {
-              const { id: ignored, ...oldImage } = image.result || {};
-              const replacingImage = Object.hasOwn(patch, "imageBlob") || Object.hasOwn(patch, "imageUrl");
-              const entry = splitNote({ ...request.result, ...replacingImage ? {} : oldImage, ...patch, id, updatedAt: Date.now() });
-              notes.put(entry.note);
-              if (entry.media) media.put(entry.media);
-              else media.delete(id);
-              const { id: ignoredAgain, ...newImage } = entry.media || {};
-              set({ ...entry.note, ...newImage });
-            } catch (error) {
-              abort(error);
-            }
-          };
-        };
-      }, "修改卡片失败");
+      return transaction(["notes", "media"], "readwrite", (tx, set, abort) => applyPatch(tx, id, () => patch, Date.now(), set, abort), "修改卡片失败");
+    }
+    async function review(id, rating, now = Date.now()) {
+      if (!RATINGS.has(rating)) fail("复习结果无效");
+      const at = number(now, Date.now(), "复习时间");
+      await ready();
+      return transaction(["notes", "media"], "readwrite", (tx, set, abort) => applyPatch(tx, id, (note) => schedule(note, rating, at), at, set, abort), "记录复习失败");
     }
     async function remove(id) {
       await ready();
@@ -564,7 +666,7 @@
       db?.close();
       db = null;
     }
-    return { ready, list, get, save, update, remove, restore, count, exportBackup, previewImport, importBackup, close };
+    return { ready, list, get, save, update, review, remove, restore, count, countDue, exportBackup, previewImport, importBackup, close };
   }
 
   // src/player.js
@@ -1013,7 +1115,7 @@
         }, 3e3);
       }
     }
-    function schedule() {
+    function schedule2() {
       identityDirty = true;
       if (!disposed && scheduled === null) scheduled = setTimer(inspect, 100);
     }
@@ -1031,7 +1133,7 @@
         const waiter = { sourceId, resolve, reject, timer: null };
         waiter.timer = setTimer(() => finishWaiter(waiter, playerError("MEDIA_TIMEOUT", "播放器尚未就绪，请稍后重试定位")), 15e3);
         waiting.add(waiter);
-        schedule();
+        schedule2();
       });
     }
     async function capture() {
@@ -1185,7 +1287,7 @@
       lastSnapshot = null;
       identityCache = null;
     }
-    for (const type of ["popstate", "hashchange", "resize"]) listen(window2, type, schedule);
+    for (const type of ["popstate", "hashchange", "resize"]) listen(window2, type, schedule2);
     for (const type of ["loadedmetadata", "loadeddata"]) listen(document2, type, (event) => {
       const snapshot = getCurrent();
       if (snapshot?.media && (event.target === snapshot.media || snapshot.container.contains?.(event.target))) {
@@ -1196,10 +1298,10 @@
           pending: false
         });
       }
-      schedule();
+      schedule2();
     }, true);
-    for (const type of ["emptied", "play", "durationchange", "fullscreenchange", "visibilitychange"]) listen(document2, type, schedule, true);
-    const observer = window2.MutationObserver ? new window2.MutationObserver(schedule) : null;
+    for (const type of ["emptied", "play", "durationchange", "fullscreenchange", "visibilitychange"]) listen(document2, type, schedule2, true);
+    const observer = window2.MutationObserver ? new window2.MutationObserver(schedule2) : null;
     let observerStarted = false;
     function observeRoot() {
       const root = document2.documentElement || document2.body;
@@ -1212,14 +1314,14 @@
     if (observer) cleanups.push(() => observer.disconnect());
     listen(document2, "DOMContentLoaded", () => {
       observeRoot();
-      schedule();
+      schedule2();
     });
     for (const method of ["pushState", "replaceState"]) {
       const original = window2.history?.[method];
       if (typeof original !== "function") continue;
       const wrapped = function(...args) {
         const result = original.apply(this, args);
-        schedule();
+        schedule2();
         return result;
       };
       try {
@@ -1252,7 +1354,8 @@
     loopAfter: 3,
     loopCount: 3,
     loopGap: 0,
-    playbackRate: 1
+    playbackRate: 1,
+    reviewBatch: 20
   });
   var GEOMETRY = /* @__PURE__ */ new Set(["left", "top", "width", "height"]);
   var BOOLEANS = /* @__PURE__ */ new Set(["enabled", "singleKeys"]);
@@ -1267,7 +1370,8 @@
     loopAfter: [0, 60],
     loopCount: [1, 20],
     loopGap: [0, 30],
-    playbackRate: [0.25, 3]
+    playbackRate: [0.25, 3],
+    reviewBatch: [5, 100]
   };
   var UNSAFE = /* @__PURE__ */ new Set(["__proto__", "prototype", "constructor"]);
   function isPlain(value) {
@@ -1302,7 +1406,7 @@
       } else if (typeof value === "number" && Number.isFinite(value)) {
         const [min, max] = LIMITS[key];
         output[key] = Math.max(min, Math.min(max, value));
-        if (key === "loopCount") output[key] = Math.round(output[key]);
+        if (key === "loopCount" || key === "reviewBatch") output[key] = Math.round(output[key]);
       }
     }
     output.left = Math.min(output.left, 100 - output.width);
@@ -1424,10 +1528,68 @@
     return { get, patch, reset, dispose };
   }
 
+  // src/editable.js
+  function getDeepActiveElement(doc = typeof document !== "undefined" ? document : null) {
+    let active = doc?.activeElement;
+    while (active?.shadowRoot?.activeElement) {
+      active = active.shadowRoot.activeElement;
+    }
+    return active;
+  }
+  function isEditableNode(node2) {
+    if (!node2) return false;
+    const el2 = node2.nodeType === 3 ? node2.parentElement : node2.nodeType === 1 || typeof node2.tagName === "string" ? node2 : null;
+    if (!el2) return false;
+    if (el2.isContentEditable) return true;
+    const tag = (el2.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+    const role = el2.getAttribute?.("role") ?? el2.attributes?.get?.("role");
+    if (role === "textbox" || role === "searchbox" || role === "combobox") return true;
+    const ce = el2.getAttribute?.("contenteditable") ?? el2.attributes?.get?.("contenteditable");
+    if (ce != null && ce !== "false") return true;
+    if (tag === "bili-comment-box" || tag === "bili-comment-reply-box" || tag === "bili-comments-box-root" || tag === "bili-comment-editor") return true;
+    if (el2.classList?.contains?.("ProseMirror") || el2.classList?.contains?.("comment-send-box") || el2.classList?.contains?.("reply-box") || el2.classList?.contains?.("bili-comment-box")) return true;
+    if (el2.closest?.('input,textarea,select,[role="textbox"],[role="searchbox"],[role="combobox"],[contenteditable]:not([contenteditable="false"]),bili-comment-box,bili-comment-reply-box,bili-comments-box-root,.comment-send-box,.reply-box,.bili-comment-box')) return true;
+    return false;
+  }
+  function isEditableEvent(targetOrEvent, doc = typeof document !== "undefined" ? document : null) {
+    if (!targetOrEvent) return false;
+    if (doc) {
+      if (isEditableNode(getDeepActiveElement(doc))) return true;
+      if (isEditableNode(doc.activeElement)) return true;
+    }
+    if (typeof targetOrEvent.composedPath === "function" || "target" in targetOrEvent) {
+      const event = targetOrEvent;
+      if (isEditableNode(event.target)) return true;
+      if (typeof event.composedPath === "function") {
+        const path = event.composedPath();
+        for (let i = 0; i < path.length; i++) {
+          if (isEditableNode(path[i])) return true;
+        }
+      }
+      return false;
+    }
+    return isEditableNode(targetOrEvent);
+  }
+
   // src/notebook.js
   var PAGE_SIZE = 30;
   var SAVE_DELAY = 550;
-  var REVIEW_STATES2 = [["new", "待复习"], ["learning", "仍不会"], ["mastered", "已掌握"]];
+  var SESSION_KEY = "bili_caption_review_session";
+  var RESUME_WINDOW = 2 * 60 * 1e3;
+  var RATING_CHOICES = [["again", "没听懂"], ["hard", "费劲"], ["good", "听懂了"]];
+  var REVIEW_STATES2 = [["new", "待复习"], ["learning", "学习中"], ["mastered", "已掌握"]];
+  function validSession(value) {
+    return Boolean(value) && Array.isArray(value.queue) && value.queue.length <= 1e4 && value.queue.every((id) => typeof id === "string") && Number.isInteger(value.index) && value.index >= 0 && value.index <= value.queue.length && ["again", "hard", "good"].every((key) => Number.isInteger(value[key]) && value[key] >= 0) && (value.pending === null || value.pending === "listen" || value.pending === "loop");
+  }
+  function readSession(store) {
+    try {
+      const value = JSON.parse(store?.getItem(SESSION_KEY) || "null");
+      return validSession(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
   function node(tag, className, text2) {
     const element = document.createElement(tag);
     if (className) element.className = className;
@@ -1485,8 +1647,8 @@
     });
   }
   function createNotebook({ repo, player, notify = () => {
-  }, version = "2.4.1", onChange = () => {
-  }, onLoop, onHelp, onSettings, getLeadIn = () => 3 }) {
+  }, version = "2.5.0", onChange = () => {
+  }, onLoop, onHelp, onSettings, getLeadIn = () => 3, getBatchSize = () => 20, sessionStorage = null, now = Date.now }) {
     let opened = false;
     let disposed = false;
     let offset = 0;
@@ -1498,6 +1660,14 @@
     let showAnswers = true;
     let importData = null;
     let undoNote = null;
+    let session = readSession(sessionStorage);
+    let dueCount = 0;
+    let sessionGeneration = 0;
+    let sessionBusy = false;
+    let playBusy = false;
+    let revealed = false;
+    let currentNote = null;
+    let revealTarget = null;
     const drafts = /* @__PURE__ */ new Map();
     const controls = /* @__PURE__ */ new Map();
     const imageUrls = /* @__PURE__ */ new Set();
@@ -1531,7 +1701,7 @@
     searchInput.autocomplete = "off";
     searchInput.setAttribute("aria-label", "搜索收藏");
     const scopeSelect = select([["current", "当前剧集"], ["all", "全部收藏"]], "收藏范围");
-    const statusSelect = select([["all", "全部状态"], ...REVIEW_STATES2], "复习状态");
+    const statusSelect = select([["all", "全部状态"], ["due", "今日到期"], ...REVIEW_STATES2], "复习状态");
     const filterRow = node("div", "bcm-filter-row");
     filterRow.append(field("范围", scopeSelect), field("状态", statusSelect));
     const revealButton = button("隐藏笔记答案", async () => {
@@ -1547,6 +1717,12 @@
     const summaryRow = node("div", "bcm-summary-row");
     summaryRow.append(resultSummary, revealButton);
     filters.append(field("搜索", searchInput), filterRow, summaryRow);
+    const dueBar = node("div", "bcm-due-bar");
+    const dueText = node("p", "bcm-due-text");
+    dueText.setAttribute("role", "status");
+    const startButton = button("开始复习", () => startSession(), "bcm-button-primary");
+    dueBar.append(dueText, startButton);
+    dueBar.hidden = true;
     const notices = node("div", "bcm-notices");
     notices.setAttribute("aria-live", "polite");
     const noticeText = node("span");
@@ -1613,7 +1789,16 @@
     pagination.append(previousButton, pageLabel, nextButton);
     pagination.hidden = true;
     const footer = node("p", "bcm-storage-note", "收藏保存在本浏览器中。清理站点数据前，请先备份。");
-    scroll.append(filters, notices, undoRegion, importRegion, list, pagination, footer);
+    const sessionView = node("section", "bcm-session");
+    sessionView.setAttribute("aria-label", "复习会话");
+    sessionView.hidden = true;
+    const sessionTop = node("div", "bcm-session-top");
+    const progressText = node("p", "bcm-session-progress");
+    progressText.setAttribute("role", "status");
+    sessionTop.append(progressText, button("结束复习", () => leaveSession(), "bcm-button-quiet"));
+    const sessionCard = node("article", "bcm-session-card");
+    sessionView.append(sessionTop, sessionCard);
+    scroll.append(dueBar, filters, notices, undoRegion, importRegion, sessionView, list, pagination, footer);
     const fileInput = node("input");
     fileInput.type = "file";
     fileInput.accept = ".json,application/json";
@@ -1703,31 +1888,55 @@
       for (const url of imageUrls) URL.revokeObjectURL(url);
       imageUrls.clear();
     }
+    function imageSource(note) {
+      if (note?.imageBlob instanceof Blob && /^image\/(jpeg|png|webp|gif|avif)$/i.test(note.imageBlob.type)) {
+        const url = URL.createObjectURL(note.imageBlob);
+        imageUrls.add(url);
+        return url;
+      }
+      return /^data:image\/(jpeg|png|webp|gif|avif);base64,/i.test(note?.imageUrl || "") ? note.imageUrl : null;
+    }
+    function showImage(container, note) {
+      const src = imageSource(note);
+      if (!src) {
+        container.textContent = "图片不可用，仍可回听原视频。";
+        return;
+      }
+      const image = node("img", "bcm-note-image");
+      image.alt = `${note.epTitle || note.seriesTitle || "视频"} ${note.timeStr || timeLabel(note.time)} 的收藏画面`;
+      image.decoding = "async";
+      image.addEventListener("error", () => {
+        container.textContent = "图片无法显示，仍可回听原视频。";
+      });
+      image.src = src;
+      container.replaceChildren(image);
+    }
     async function loadImage(container, id, generation) {
       if (disposed || generation !== renderGeneration || container.dataset.loaded) return;
       container.dataset.loaded = "true";
       try {
         const note = await repo.get(id);
         if (disposed || generation !== renderGeneration || !container.isConnected) return;
-        let src = null;
-        if (note?.imageBlob instanceof Blob && /^image\/(jpeg|png|webp|gif|avif)$/i.test(note.imageBlob.type)) {
-          src = URL.createObjectURL(note.imageBlob);
-          imageUrls.add(src);
-        } else if (/^data:image\/(jpeg|png|webp|gif|avif);base64,/i.test(note?.imageUrl || "")) {
-          src = note.imageUrl;
-        }
-        if (!src) throw new Error("图片不可用");
-        const image = node("img", "bcm-note-image");
-        image.alt = `${note.epTitle || note.seriesTitle || "视频"} ${note.timeStr || timeLabel(note.time)} 的收藏画面`;
-        image.decoding = "async";
-        image.addEventListener("error", () => {
-          container.textContent = "图片无法显示，仍可回听原视频。";
-        });
-        image.src = src;
-        container.replaceChildren(image);
+        showImage(container, note);
       } catch {
         if (!disposed && generation === renderGeneration) container.textContent = "图片无法加载，仍可回听原视频。";
       }
+    }
+    function sameSource(note) {
+      const sourceId = note?.source?.sourceId;
+      return Boolean(sourceId) && player.getCurrent?.()?.identity?.source?.sourceId === sourceId;
+    }
+    async function listen(note) {
+      const result = await player.seek(note, { leadIn: leadInFor(note) });
+      if (!result?.navigated) {
+        const current = player.getCurrent?.();
+        if (!current?.sourceReady || note.source?.sourceId && current.identity?.source?.sourceId !== note.source.sourceId) {
+          throw new Error("视频正在切换，请画面就绪后重试");
+        }
+        if (typeof current.media?.play !== "function") throw new Error("播放器暂时无法播放，请手动继续");
+        await current.media.play();
+      }
+      return Boolean(result?.navigated);
     }
     async function playNote(note, control, loop = false) {
       control.disabled = true;
@@ -1737,17 +1946,7 @@
           return;
         }
         if (loop && onLoop) await onLoop(note);
-        else {
-          const result = await player.seek(note, { leadIn: leadInFor(note) });
-          if (!result?.navigated) {
-            const current = player.getCurrent?.();
-            if (!current?.sourceReady || note.source?.sourceId && current.identity?.source?.sourceId !== note.source.sourceId) {
-              throw new Error("视频正在切换，请画面就绪后重试");
-            }
-            if (typeof current.media?.play !== "function") throw new Error("播放器暂时无法播放，请手动继续");
-            await current.media.play();
-          }
-        }
+        else await listen(note);
       } catch (error) {
         const message = `回听失败：${readableError(error)}`;
         setNotice(message, true);
@@ -1813,7 +2012,8 @@
       const reviewSelect = select(REVIEW_STATES2, "这条收藏的复习状态");
       reviewSelect.value = data.reviewState || "new";
       reviewSelect.addEventListener("change", async () => {
-        queueDraft(note.id, { reviewState: reviewSelect.value });
+        const state = reviewSelect.value;
+        queueDraft(note.id, state === "mastered" ? { reviewState: state } : { reviewState: state, dueAt: now() });
         await saveDraft(note.id);
       });
       const bottom = node("div", "bcm-note-bottom");
@@ -1845,6 +2045,10 @@
       try {
         if (typeof repo.ready === "function") await repo.ready();
         else await repo.ready;
+        if (sessionActive()) {
+          updateDue(scopeSelect.value === "current" && !seriesId ? void 0 : seriesId, generation);
+          return;
+        }
         const result = scopeSelect.value === "current" && !seriesId ? { notes: [], total: 0 } : await repo.list({ seriesId, query: searchInput.value.trim(), status: statusSelect.value, offset, limit: PAGE_SIZE });
         if (disposed || generation !== refreshGeneration || !opened) return;
         total = result.total;
@@ -1861,8 +2065,9 @@
           const empty = node("div", "bcm-empty");
           const filtered = Boolean(searchInput.value.trim()) || statusSelect.value !== "all";
           const noPlayer = scopeSelect.value === "current" && !seriesId;
-          empty.append(node("h3", "", noPlayer ? "当前没有可用的视频" : filtered ? "没有符合条件的收藏" : "把想再听的瞬间留下来"));
-          empty.append(node("p", "", noPlayer ? "切换到“全部收藏”查看历史记录，或打开 B 站视频。" : filtered ? "试试其他关键词，或将复习状态设为“全部状态”。" : "播放时按 Alt + S 收藏画面；之后可从这里回听、做笔记。"));
+          const noDue = statusSelect.value === "due" && !searchInput.value.trim();
+          empty.append(node("h3", "", noPlayer ? "当前没有可用的视频" : noDue ? "今天没有到期的收藏" : filtered ? "没有符合条件的收藏" : "把想再听的瞬间留下来"));
+          empty.append(node("p", "", noPlayer ? "切换到“全部收藏”查看历史记录，或打开 B 站视频。" : noDue ? "新收藏会立即到期；复习过的收藏按间隔再次出现。" : filtered ? "试试其他关键词，或将复习状态设为“全部状态”。" : "播放时按 Alt + S 收藏画面；之后可从这里回听、做笔记。"));
           fragment.append(empty);
         }
         list.replaceChildren(fragment);
@@ -1871,6 +2076,7 @@
         previousButton.disabled = offset === 0;
         nextButton.disabled = offset + PAGE_SIZE >= total;
         pagination.hidden = total <= PAGE_SIZE;
+        updateDue(scopeSelect.value === "current" && !seriesId ? void 0 : seriesId, generation);
       } catch (error) {
         if (generation === refreshGeneration) {
           resultSummary.textContent = "收藏加载失败";
@@ -1879,6 +2085,313 @@
         }
       } finally {
         if (generation === refreshGeneration) list.removeAttribute("aria-busy");
+      }
+    }
+    function saveSession() {
+      try {
+        sessionStorage?.setItem(SESSION_KEY, JSON.stringify(session));
+      } catch {
+      }
+    }
+    function clearSession() {
+      session = null;
+      try {
+        sessionStorage?.removeItem(SESSION_KEY);
+      } catch {
+      }
+    }
+    function remaining() {
+      return session ? session.queue.length - session.index : 0;
+    }
+    function sessionActive() {
+      return opened && !sessionView.hidden;
+    }
+    function batchSize() {
+      const value = Number(getBatchSize());
+      return Number.isFinite(value) ? Math.max(1, Math.min(200, Math.round(value))) : 20;
+    }
+    function renderDueBar() {
+      const left = remaining();
+      if (left > 0) {
+        dueText.textContent = `上次复习还剩 ${left} 条`;
+        startButton.textContent = "继续复习";
+      } else if (dueCount > 0) {
+        dueText.textContent = `有 ${dueCount} 条收藏到期，该复习了`;
+        startButton.textContent = "开始复习";
+      }
+      dueBar.hidden = left === 0 && dueCount === 0;
+      startButton.hidden = false;
+    }
+    async function updateDue(seriesId, generation) {
+      let failed = false;
+      try {
+        const due = seriesId === void 0 ? 0 : await repo.countDue(seriesId, now());
+        if (disposed || generation !== refreshGeneration) return;
+        dueCount = due;
+      } catch {
+        if (disposed || generation !== refreshGeneration) return;
+        dueCount = 0;
+        failed = true;
+      }
+      renderDueBar();
+      if (failed) {
+        dueText.textContent = "无法读取到期的收藏";
+        dueBar.hidden = false;
+        startButton.hidden = true;
+      }
+    }
+    async function refreshDue() {
+      if (disposed || !opened) return;
+      await updateDue(scopeSelect.value === "current" ? player.getCurrent?.()?.identity?.seriesId || void 0 : null, refreshGeneration);
+    }
+    async function startSession() {
+      if (sessionBusy || disposed) return;
+      if (remaining() > 0) {
+        await enterSession();
+        return;
+      }
+      sessionBusy = true;
+      startButton.disabled = true;
+      try {
+        if (!await flushDrafts()) throw new Error("仍有未保存笔记，请先重试保存");
+        const seriesId = scopeSelect.value === "current" ? player.getCurrent?.()?.identity?.seriesId : null;
+        if (scopeSelect.value === "current" && !seriesId) throw new Error("当前没有可用的视频，请选择全部收藏");
+        const due = [];
+        let sessionOffset = 0;
+        for (; ; ) {
+          const batch = await repo.list({ seriesId, status: "due", offset: sessionOffset, limit: 500 });
+          due.push(...batch.notes);
+          sessionOffset += batch.notes.length;
+          if (!batch.notes.length || sessionOffset >= batch.total) break;
+        }
+        if (disposed) return;
+        if (!due.length) {
+          setNotice("目前没有到期的收藏。");
+          return;
+        }
+        session = {
+          queue: orderSession(due, { currentSourceId: player.getCurrent?.()?.identity?.source?.sourceId, limit: batchSize() }).map((note) => note.id),
+          index: 0,
+          again: 0,
+          hard: 0,
+          good: 0,
+          pending: null,
+          pendingAt: 0
+        };
+        saveSession();
+        await enterSession();
+      } catch (error) {
+        if (!disposed) setNotice(`无法开始复习：${readableError(error)}`, true);
+      } finally {
+        sessionBusy = false;
+        startButton.disabled = false;
+      }
+    }
+    async function enterSession() {
+      sessionView.hidden = false;
+      for (const item of [dueBar, filters, list, pagination, footer]) item.hidden = true;
+      scroll.scrollTop = 0;
+      return showSessionCard();
+    }
+    function showListView() {
+      sessionGeneration += 1;
+      currentNote = null;
+      revealTarget = null;
+      sessionView.hidden = true;
+      for (const item of [dueBar, filters, list, footer]) item.hidden = false;
+    }
+    function leaveSession() {
+      showListView();
+      return refresh();
+    }
+    async function showSessionCard() {
+      const generation = ++sessionGeneration;
+      revealed = false;
+      currentNote = null;
+      revealTarget = null;
+      clearImages();
+      while (session && session.index < session.queue.length) {
+        const id = session.queue[session.index];
+        progressText.textContent = `还剩 ${session.queue.length - session.index} 条`;
+        sessionCard.replaceChildren(node("p", "bcm-session-hint", "正在载入…"));
+        let note;
+        try {
+          note = await repo.get(id);
+        } catch (error) {
+          if (generation !== sessionGeneration) return null;
+          sessionCard.replaceChildren(node("p", "bcm-session-hint", `无法读取这条收藏：${readableError(error)}`), button("重试", () => showSessionCard()));
+          return null;
+        }
+        if (generation !== sessionGeneration) return null;
+        if (note && isDue(note, now())) {
+          currentNote = note;
+          renderSessionCard(note);
+          scroll.scrollTop = 0;
+          return note;
+        }
+        session.index += 1;
+        saveSession();
+      }
+      if (generation === sessionGeneration) finishSession();
+      return null;
+    }
+    function renderSessionCard(note) {
+      const title2 = node("h3", "bcm-session-title", `${note.epTitle || note.seriesTitle || "未命名视频"} · ${note.timeStr || timeLabel(note.time)}`);
+      title2.tabIndex = -1;
+      const here = sameSource(note);
+      const hint = node("p", "bcm-session-hint", here ? "先听一遍，回想意思，再看答案。" : "这条收藏在其他视频里。回听会跳转过去，页面就绪后自动继续复习。");
+      if (here) hint.append(node("span", "bcm-nowrap", "空格显示答案，1 / 2 / 3 自评。"));
+      const playback = node("div", "bcm-playback-row");
+      const playButton = button("回听", () => sessionPlay(note, false, playButton), "bcm-button-primary bcm-play-button");
+      playButton.title = `从收藏时间前 ${leadInFor(note)} 秒开始回听`;
+      playback.append(playButton);
+      if (onLoop) playback.append(button("片段循环", () => sessionPlay(note, true)));
+      const answer = node("div", "bcm-session-answer");
+      answer.hidden = true;
+      if (note.hasImage || note.imageUrl || note.imageBlob) {
+        const container = node("div", "bcm-image-placeholder", "正在载入场景…");
+        answer.append(container);
+        showImage(container, note);
+      }
+      answer.append(node("p", "bcm-session-note", note.userNote || "这条收藏没有笔记。"));
+      if (note.tags?.length) answer.append(node("p", "bcm-session-tags", `标签：${note.tags.join("、")}`));
+      const revealButton2 = button("显示答案", () => reveal(), "bcm-button-primary");
+      const ratings = node("div", "bcm-ratings");
+      ratings.setAttribute("role", "group");
+      ratings.setAttribute("aria-label", "这次听得怎么样");
+      ratings.hidden = true;
+      const upcoming = schedule(note, "good");
+      const hints = { again: "稍后再来", hard: "明天再来", good: upcoming.reviewState === "mastered" ? "记为已掌握" : `${upcoming.interval} 天后再来` };
+      RATING_CHOICES.forEach(([rating, label], position) => {
+        const choice = button("", () => rate(rating), "bcm-rating");
+        choice.dataset.rating = rating;
+        choice.setAttribute("aria-label", `${label}，${hints[rating]}`);
+        const name = node("span", "bcm-rating-label");
+        name.append(node("kbd", "", String(position + 1)), node("span", "", label));
+        choice.append(name, node("small", "", hints[rating]));
+        ratings.append(choice);
+      });
+      sessionCard.replaceChildren(title2, hint, playback, revealButton2, answer, ratings);
+      revealTarget = { title: title2, revealButton: revealButton2, answer, ratings };
+      title2.focus({ preventScroll: true });
+    }
+    function reveal() {
+      if (!sessionActive() || revealed || !revealTarget) return;
+      revealed = true;
+      revealTarget.revealButton.hidden = true;
+      revealTarget.answer.hidden = false;
+      revealTarget.ratings.hidden = false;
+    }
+    async function rate(rating) {
+      if (!sessionActive() || !revealed || sessionBusy || !currentNote) return;
+      const id = session.queue[session.index];
+      const choices = revealTarget.ratings.children;
+      sessionBusy = true;
+      for (const choice of choices) choice.disabled = true;
+      try {
+        await repo.review(id, rating);
+        if (session?.queue[session.index] !== id) return;
+        session[rating] += 1;
+        session.index += 1;
+        if (rating === "again") session.queue.push(id);
+        saveSession();
+        signalChange();
+        await showSessionCard();
+      } catch (error) {
+        setNotice(`自评没有保存：${readableError(error)}`, true);
+        for (const choice of choices) choice.disabled = false;
+      } finally {
+        sessionBusy = false;
+      }
+    }
+    function finishSession() {
+      const result = session;
+      clearSession();
+      clearImages();
+      revealed = false;
+      progressText.textContent = "本轮结束";
+      const actions = node("div", "bcm-playback-row");
+      actions.append(button("再来一组", () => restartSession(), "bcm-button-primary"), button("返回复习本", () => leaveSession()));
+      const title2 = node("h3", "bcm-session-title", "本轮复习完成");
+      title2.tabIndex = -1;
+      sessionCard.replaceChildren(
+        title2,
+        node("p", "bcm-session-hint", `复习了 ${result.queue.length - result.again} 条收藏：听懂了 ${result.good}，费劲 ${result.hard}，没听懂 ${result.again}。`),
+        node("p", "bcm-session-hint", "听懂的收藏会在 1、3、7、15、31 天后依次再出现。到期时，播放器按钮和复习本顶部会提示。"),
+        actions
+      );
+      title2.focus({ preventScroll: true });
+    }
+    async function restartSession() {
+      showListView();
+      await refresh();
+      await startSession();
+    }
+    async function sessionPlay(note, loop, control = null) {
+      if (playBusy || !note) return;
+      playBusy = true;
+      if (control) control.disabled = true;
+      try {
+        if (!await flushDrafts()) {
+          setNotice("笔记尚未保存成功。请先重试保存，再回听，避免切换视频时丢失草稿。", true);
+          return;
+        }
+        if (!sameSource(note)) {
+          session.pending = loop ? "loop" : "listen";
+          session.pendingAt = now();
+          saveSession();
+        }
+        const navigated = loop && onLoop ? Boolean((await onLoop(note))?.navigated) : await listen(note);
+        if (!navigated) dropPending();
+      } catch (error) {
+        dropPending();
+        const message = `回听失败：${readableError(error)}`;
+        setNotice(message, true);
+        notify(message, { kind: "error" });
+      } finally {
+        playBusy = false;
+        if (control) control.disabled = false;
+        if (currentNote === note) revealTarget?.title.focus({ preventScroll: true });
+      }
+    }
+    function dropPending() {
+      if (!session?.pending) return;
+      session.pending = null;
+      saveSession();
+    }
+    async function resumeSession() {
+      if (disposed || !session?.pending) return false;
+      const action = session.pending;
+      const expired = now() - session.pendingAt > RESUME_WINDOW;
+      session.pending = null;
+      saveSession();
+      if (expired) return false;
+      await open();
+      const note = await enterSession();
+      if (action === "loop" && note && sameSource(note)) await sessionPlay(note, true);
+      return true;
+    }
+    function isInteractiveControl(target) {
+      if (!target) return false;
+      const tag = (target.tagName || "").toLowerCase();
+      return tag === "button" || tag === "a" || Boolean(target.closest?.("button, a"));
+    }
+    function insideOverlayPanel(target) {
+      return Boolean(target?.closest?.(".bcm-panel"));
+    }
+    function onSessionKey(event) {
+      if (!sessionActive() || event.isComposing || event.repeat || event.ctrlKey || event.metaKey || event.altKey || isEditableEvent(event)) return;
+      const deepActive = getDeepActiveElement();
+      if (insideOverlayPanel(event.target) || insideOverlayPanel(deepActive)) return;
+      const rating = RATING_CHOICES[Number(event.key) - 1];
+      if (revealed && rating) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        void rate(rating[0]);
+      } else if (event.key === " " && !revealed && !isInteractiveControl(event.target) && !isInteractiveControl(deepActive)) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        reveal();
       }
     }
     async function backup() {
@@ -2042,6 +2555,7 @@
       event.returnValue = "";
     }
     window.addEventListener("beforeunload", protectDrafts);
+    window.addEventListener("keydown", onSessionKey, true);
     async function open() {
       if (disposed) return;
       if (!opened) returnFocus = document.activeElement;
@@ -2058,6 +2572,7 @@
       opened = false;
       refreshGeneration += 1;
       renderGeneration += 1;
+      showListView();
       clearImages();
       element.hidden = true;
       element.inert = true;
@@ -2069,14 +2584,16 @@
       opened = false;
       refreshGeneration += 1;
       renderGeneration += 1;
+      sessionGeneration += 1;
       clearTimeout(searchTimer);
       window.removeEventListener("beforeunload", protectDrafts);
+      window.removeEventListener("keydown", onSessionKey, true);
       for (const draft of drafts.values()) clearTimeout(draft.timer);
       clearImages();
       controls.clear();
       element.remove();
     }
-    return { element, open, close, toggle: () => opened ? close() : open(), refresh, dispose, isOpen: () => opened, flushDrafts };
+    return { element, open, close, toggle: () => opened ? close() : open(), refresh, refreshDue, resumeSession, dispose, isOpen: () => opened, flushDrafts };
   }
 
   // src/review.js
@@ -2466,54 +2983,11 @@
   var app_default = '.bcm-root {\n  --bcm-text: #f2f6fb; --bcm-muted: #b8c9dd; --bcm-surface: #141c26;\n  --bcm-panel: #1c2733; --bcm-line: #405063; --bcm-accent: #75d2fa;\n  position: fixed; inset: 0; z-index: 2147483000; pointer-events: none;\n  color: var(--bcm-text); font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif;\n  text-align: start; color-scheme: dark;\n}\n.bcm-root [hidden], .bcm-dock[hidden], .bcm-mask[hidden] { display: none !important; }\n.bcm-root *, .bcm-dock *, .bcm-mask * { box-sizing: border-box; }\n.bcm-root :focus-visible, .bcm-dock :focus-visible, .bcm-mask :focus-visible { outline: 2px solid #75d2fa; outline-offset: 3px; }\n.bcm-root button, .bcm-root input, .bcm-root select, .bcm-dock button, .bcm-mask button { font: inherit; }\n.bcm-root ::selection { background: #75d2fa; color: #092333; }\n.bcm-root button:disabled, .bcm-dock button:disabled { opacity: .6; cursor: wait; }\n.bcm-root .bcm-notebook { z-index: 10; }\n.bcm-root .bcm-loopbar { z-index: 20; }\n.bcm-root .bcm-panel { z-index: 30; }\n.bcm-root .bcm-notification { z-index: 40; pointer-events: none; }\n.bcm-mask {\n  position: absolute !important; z-index: 25 !important; box-sizing: border-box !important;\n  user-select: none; touch-action: none; cursor: pointer; pointer-events: auto;\n  background: transparent; backdrop-filter: blur(var(--bcm-blur,14px));\n  -webkit-backdrop-filter: blur(var(--bcm-blur,14px));\n  mask-image: linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 16%,#000 84%,transparent);\n  mask-composite: intersect;\n  -webkit-mask-image: linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 16%,#000 84%,transparent);\n  -webkit-mask-composite: source-in;\n}\n.bcm-mask.bcm-solid { background: #151b22; backdrop-filter: none; -webkit-backdrop-filter: none; }\n.bcm-mask:not(.bcm-edit):not(.bcm-wheeling):hover, .bcm-mask.bcm-peek:not(.bcm-edit):not(.bcm-wheeling) {\n  background: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; mask-image: none; -webkit-mask-image: none;\n}\n.bcm-mask.bcm-edit, .bcm-mask.bcm-wheeling {\n  mask-image: none; -webkit-mask-image: none; outline: 2px dashed #75d2fa;\n  background: rgb(16 49 66 / 45%); backdrop-filter: blur(3px); cursor: move;\n}\n.bcm-mask .bcm-mask-tools {\n  position: absolute; bottom: calc(100% + 8px); right: 0; display: none;\n  align-items: center; flex-wrap: wrap; gap: 6px; min-width: 180px;\n  padding: 5px 8px; border-radius: 7px; background: #141c26; color: #f2f6fb;\n  font: 12px/1.5 system-ui, sans-serif;\n}\n.bcm-mask.bcm-edit .bcm-mask-tools { display: flex; }\n.bcm-mask-tools button, .bcm-dock button {\n  appearance: none; color: #eaf5ff; background: transparent; border: 0;\n  padding: 6px 8px; min-height: 30px; border-radius: 5px; cursor: pointer;\n}\n.bcm-dock button:hover, .bcm-mask-tools button:hover { background: #34495c; }\n.bcm-handle { display: none; position: absolute; width: 12px; height: 12px; background: #75d2fa; border: 1px solid #0e2836; border-radius: 2px; }\n.bcm-edit .bcm-handle { display: block; }\n.bcm-handle[data-handle="n"] { top:-6px; left:calc(50% - 6px); cursor:ns-resize; }\n.bcm-handle[data-handle="s"] { bottom:-6px; left:calc(50% - 6px); cursor:ns-resize; }\n.bcm-handle[data-handle="e"] { right:-6px; top:calc(50% - 6px); cursor:ew-resize; }\n.bcm-handle[data-handle="w"] { left:-6px; top:calc(50% - 6px); cursor:ew-resize; }\n.bcm-handle[data-handle="nw"] { top:-6px; left:-6px; cursor:nwse-resize; }\n.bcm-handle[data-handle="ne"] { top:-6px; right:-6px; cursor:nesw-resize; }\n.bcm-handle[data-handle="sw"] { bottom:-6px; left:-6px; cursor:nesw-resize; }\n.bcm-handle[data-handle="se"] { bottom:-6px; right:-6px; cursor:nwse-resize; }\n.bcm-dock {\n  position: absolute; top: 12px; right: 12px; z-index: 26;\n  display: flex; flex-wrap: wrap; align-items: center; gap: 2px; max-width: calc(100% - 24px);\n  padding: 4px 6px; border-radius: 9px; background: rgb(20 28 38 / 92%);\n  color: #f2f6fb; font: 12px/1.4 system-ui, "Microsoft YaHei", sans-serif;\n  transition: opacity .2s ease; pointer-events: auto;\n}\n.bcm-dock.bcm-idle:not(:hover):not(:focus-within) { opacity: 0; pointer-events: none; }\n.bcm-dock .bcm-version-button { color: #75d2fa; font-variant-numeric: tabular-nums; }\n.bcm-notification {\n  position: absolute; top: 18px; left: 50%; transform: translateX(-50%);\n  max-width: min(620px,calc(100% - 32px)); padding: 12px 18px; border-radius: 9px;\n  background: #1c2733; color: #f2f6fb; box-shadow: 0 8px 24px rgb(0 0 0 / 28%);\n  overflow-wrap: anywhere; pointer-events: auto;\n}\n.bcm-notification[data-kind="error"] { color: #ffc0bc; }\n.bcm-panel {\n  position: absolute; top: 14px; right: 14px; width: min(390px,calc(100% - 28px));\n  max-height: calc(100% - 28px); overflow: auto; padding: 20px; border-radius: 12px;\n  background: #141c26; color: #f2f6fb; box-shadow: 0 12px 32px rgb(0 0 0 / 32%);\n  pointer-events: auto; scrollbar-color: #536b80 #141c26;\n}\n.bcm-panel h2 { margin: 0 0 14px; font-size: 20px; font-weight: 650; }\n.bcm-panel p { margin: 10px 0; color: #b8c9dd; }\n.bcm-panel label { display: grid; grid-template-columns: 1fr 112px; gap: 12px; align-items: center; margin: 12px 0; }\n.bcm-panel input:not([type="checkbox"]), .bcm-panel select {\n  min-width: 0; width: 100%; min-height: 34px; padding: 6px 8px;\n  border: 1px solid #53677b; border-radius: 5px; background: #111923; color: #f2f6fb;\n}\n.bcm-panel input[type="checkbox"] { justify-self: end; width: 18px; height: 18px; accent-color: #75d2fa; }\n.bcm-panel button, .bcm-loopbar button {\n  border: 1px solid #53677b; background: #253647; color: #f2f6fb; border-radius: 6px;\n  min-height: 34px; padding: 7px 12px; cursor: pointer;\n}\n.bcm-panel button:hover, .bcm-loopbar button:hover { background: #38536b; }\n.bcm-panel .bcm-primary { background: #75d2fa; border-color: #75d2fa; color: #092333; }\n.bcm-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }\n.bcm-panel dl { margin: 14px 0; }\n.bcm-panel dt { margin-top: 12px; font-weight: 650; }\n.bcm-panel dd { margin: 4px 0 0; color: #b8c9dd; }\n.bcm-loopbar {\n  position: absolute; bottom: 74px; left: 50%; transform: translateX(-50%);\n  display: flex; align-items: center; flex-wrap: wrap; gap: 12px;\n  max-width: calc(100% - 24px); padding: 10px 14px; border-radius: 9px;\n  background: #141c26; color: #f2f6fb; pointer-events: auto;\n  font-variant-numeric: tabular-nums;\n}\n@media (max-width: 540px) {\n  .bcm-dock { top: 6px; right: 6px; max-width: calc(100% - 12px); }\n  .bcm-dock button { padding: 5px 6px; }\n  .bcm-notification { top: 6px; }\n}\n@media (prefers-reduced-motion: reduce) { .bcm-dock { transition: none; } }\n';
 
   // src/notebook.css
-  var notebook_default = '.bcm-notebook {\n    --bcm-surface: #141c26;\n    --bcm-panel: #1c2733;\n    --bcm-field: #111923;\n    --bcm-line: #405063;\n    --bcm-text: #f2f6fb;\n    --bcm-muted: #b8c9dd;\n    --bcm-accent: #75d2fa;\n    --bcm-accent-ink: #092333;\n    --bcm-error: #ffc0bc;\n    position: absolute;\n    inset-block: 0;\n    inset-inline-end: 0;\n    display: flex;\n    flex-direction: column;\n    box-sizing: border-box;\n    width: 420px;\n    max-width: 100vw;\n    max-width: min(100vw, 100%);\n    height: 100%;\n    min-height: 0;\n    overflow: hidden;\n    color: var(--bcm-text);\n    background: var(--bcm-surface);\n    box-shadow: -12px 0 32px rgb(0 0 0 / 30%);\n    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;\n    text-align: start;\n    color-scheme: dark;\n    isolation: isolate;\n    pointer-events: auto;\n}\n\n.bcm-notebook [hidden], .bcm-notebook[hidden] { display: none !important; }\n.bcm-notebook *, .bcm-notebook *::before, .bcm-notebook *::after { box-sizing: border-box; }\n.bcm-notebook h2, .bcm-notebook h3, .bcm-notebook p { margin: 0; padding: 0; }\n.bcm-notebook button, .bcm-notebook input, .bcm-notebook select, .bcm-notebook textarea { font: inherit; letter-spacing: normal; }\n.bcm-notebook ::selection { color: var(--bcm-accent-ink); background: var(--bcm-accent); }\n.bcm-notebook :focus-visible { outline: 2px solid var(--bcm-accent); outline-offset: 3px; }\n.bcm-notebook button:disabled { opacity: .55; cursor: not-allowed; }\n.bcm-notebook button { touch-action: manipulation; }\n.bcm-notebook-header { flex: none; padding: 18px 18px 14px; border-block-end: 1px solid var(--bcm-line); background: var(--bcm-surface); }\n.bcm-heading-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-notebook .bcm-notebook-title { margin-inline-end: auto; font-size: 20px; line-height: 1.3; font-weight: 650; }\n.bcm-version { color: var(--bcm-accent); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notebook .bcm-subtitle { margin-block: 8px 12px; color: var(--bcm-muted); font-size: 14px; }\n.bcm-toolbar { display: flex; flex-wrap: wrap; gap: 8px; }\n.bcm-notebook .bcm-button {\n    appearance: none;\n    display: inline-flex;\n    justify-content: center;\n    align-items: center;\n    gap: 6px;\n    min-height: 36px;\n    max-width: 100%;\n    padding: 7px 11px;\n    border: 1px solid var(--bcm-line);\n    border-radius: 7px;\n    color: var(--bcm-text);\n    background: var(--bcm-panel);\n    font-size: 13px;\n    line-height: 1.3;\n    text-align: center;\n    text-decoration: none;\n    overflow-wrap: anywhere;\n    cursor: pointer;\n}\n.bcm-notebook .bcm-button:hover:not(:disabled) { background: #2b3c4e; border-color: #7891aa; }\n.bcm-notebook .bcm-button-primary { color: var(--bcm-accent-ink); background: var(--bcm-accent); border-color: transparent; font-weight: 650; }\n.bcm-notebook .bcm-button-primary:hover:not(:disabled) { background: #a0e3ff; border-color: transparent; }\n.bcm-notebook .bcm-button-quiet { background: transparent; border-color: transparent; color: var(--bcm-muted); }\n.bcm-notebook .bcm-delete:hover:not(:disabled) { color: var(--bcm-error); background: #452d32; border-color: transparent; }\n.bcm-notebook-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: #657c92 var(--bcm-surface); scrollbar-width: thin; }\n.bcm-notebook-scroll::-webkit-scrollbar { width: 8px; }\n.bcm-notebook-scroll::-webkit-scrollbar-track { background: var(--bcm-surface); }\n.bcm-notebook-scroll::-webkit-scrollbar-thumb { background: #657c92; border-radius: 8px; border: 2px solid var(--bcm-surface); }\n.bcm-filters { padding: 18px; display: grid; gap: 12px; }\n.bcm-field { display: grid; gap: 6px; min-width: 0; }\n.bcm-label { color: var(--bcm-muted); font-size: 12px; line-height: 1.4; }\n.bcm-filter-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }\n.bcm-notebook .bcm-input, .bcm-notebook .bcm-select {\n    appearance: auto;\n    display: block;\n    width: 100%;\n    min-width: 0;\n    max-width: 100%;\n    min-height: 38px;\n    padding: 8px 10px;\n    border: 1px solid var(--bcm-line);\n    border-radius: 7px;\n    color: var(--bcm-text);\n    background: var(--bcm-field);\n    caret-color: var(--bcm-accent);\n    font-size: 14px;\n    line-height: 1.5;\n}\n.bcm-notebook .bcm-input::placeholder { color: #a3b7ce; opacity: 1; }\n.bcm-notebook textarea.bcm-input { min-height: 86px; resize: vertical; overflow-wrap: anywhere; }\n.bcm-summary-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-result-summary { flex: 1; color: var(--bcm-muted); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notices, .bcm-undo { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 18px 16px; padding: 12px; background: #233747; border-radius: 8px; overflow-wrap: anywhere; }\n.bcm-notices > span, .bcm-undo > span { flex: 1 1 180px; }\n.bcm-notice-error { color: var(--bcm-error); background: #3b272d; }\n.bcm-import-preview { margin: 0 18px 18px; padding: 14px; background: var(--bcm-panel); border-radius: 8px; overflow-wrap: anywhere; }\n.bcm-notebook .bcm-import-preview h3 { font-size: 16px; margin-block-end: 8px; }\n.bcm-notebook .bcm-import-preview p { margin-block-end: 12px; }\n.bcm-note-list { padding-inline: 18px; }\n.bcm-note { display: grid; gap: 12px; padding-block: 20px 22px; border-block-start: 1px solid var(--bcm-line); min-width: 0; }\n.bcm-note-header { display: flex; align-items: start; gap: 10px; min-width: 0; }\n.bcm-notebook .bcm-note-title { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 15px; line-height: 1.5; font-weight: 600; }\n.bcm-note-header .bcm-button { flex-shrink: 0; }\n.bcm-note-meta { color: var(--bcm-muted); font-size: 12px; overflow-wrap: anywhere; }\n.bcm-image-placeholder { display: grid; align-items: center; min-height: 80px; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 8px; color: var(--bcm-muted); background: #0c121a; font-size: 13px; text-align: center; }\n.bcm-note-image { display: block; width: 100%; height: 100%; object-fit: contain; }\n.bcm-playback-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-play-button { font-variant-numeric: tabular-nums; }\n.bcm-note-bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, 1fr); align-items: end; gap: 12px; }\n.bcm-save-state { padding-block-end: 10px; color: var(--bcm-muted); font-size: 12px; text-align: end; overflow-wrap: anywhere; }\n.bcm-save-error { color: var(--bcm-error); }\n.bcm-empty { padding: 28px 8px 36px; color: var(--bcm-muted); overflow-wrap: anywhere; }\n.bcm-notebook .bcm-empty h3 { color: var(--bcm-text); font-size: 16px; margin-block-end: 10px; }\n.bcm-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 14px 18px; border-block-start: 1px solid var(--bcm-line); }\n.bcm-page-label { color: var(--bcm-muted); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notebook .bcm-storage-note { padding: 16px 18px 22px; color: var(--bcm-muted); font-size: 12px; overflow-wrap: anywhere; }\n@media (max-width: 440px) {\n    .bcm-notebook { width: 100%; }\n    .bcm-notebook-header { padding: 12px; }\n    .bcm-filters { padding: 14px 12px; }\n    .bcm-note-list { padding-inline: 12px; }\n    .bcm-notices, .bcm-undo, .bcm-import-preview { margin-inline: 12px; }\n    .bcm-notebook .bcm-input, .bcm-notebook .bcm-select { font-size: 16px; }\n    .bcm-toolbar { gap: 6px; }\n}\n@media (max-height: 420px) {\n    .bcm-notebook-header { padding-block: 10px; }\n    .bcm-notebook .bcm-subtitle { display: none; }\n    .bcm-notebook-header .bcm-toolbar { margin-block-start: 8px; }\n}\n@media (prefers-reduced-motion: reduce) {\n    .bcm-notebook *, .bcm-notebook *::before, .bcm-notebook *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }\n}\n@media (forced-colors: active) {\n    .bcm-notebook { border: 1px solid CanvasText; }\n    .bcm-notebook :focus-visible { outline-color: Highlight; }\n    .bcm-notebook .bcm-button { border: 1px solid ButtonText; }\n}\n';
+  var notebook_default = '.bcm-notebook {\n    --bcm-surface: #141c26;\n    --bcm-panel: #1c2733;\n    --bcm-field: #111923;\n    --bcm-line: #405063;\n    --bcm-text: #f2f6fb;\n    --bcm-muted: #b8c9dd;\n    --bcm-accent: #75d2fa;\n    --bcm-accent-ink: #092333;\n    --bcm-error: #ffc0bc;\n    position: absolute;\n    inset-block: 0;\n    inset-inline-end: 0;\n    display: flex;\n    flex-direction: column;\n    box-sizing: border-box;\n    width: 420px;\n    max-width: 100vw;\n    max-width: min(100vw, 100%);\n    height: 100%;\n    min-height: 0;\n    overflow: hidden;\n    color: var(--bcm-text);\n    background: var(--bcm-surface);\n    box-shadow: -12px 0 32px rgb(0 0 0 / 30%);\n    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;\n    text-align: start;\n    color-scheme: dark;\n    isolation: isolate;\n    pointer-events: auto;\n}\n\n.bcm-notebook [hidden], .bcm-notebook[hidden] { display: none !important; }\n.bcm-notebook *, .bcm-notebook *::before, .bcm-notebook *::after { box-sizing: border-box; }\n.bcm-notebook h2, .bcm-notebook h3, .bcm-notebook p { margin: 0; padding: 0; }\n.bcm-notebook button, .bcm-notebook input, .bcm-notebook select, .bcm-notebook textarea { font: inherit; letter-spacing: normal; }\n.bcm-notebook ::selection { color: var(--bcm-accent-ink); background: var(--bcm-accent); }\n.bcm-notebook :focus-visible { outline: 2px solid var(--bcm-accent); outline-offset: 3px; }\n.bcm-notebook button:disabled { opacity: .55; cursor: not-allowed; }\n.bcm-notebook button { touch-action: manipulation; }\n.bcm-notebook-header { flex: none; padding: 18px 18px 14px; border-block-end: 1px solid var(--bcm-line); background: var(--bcm-surface); }\n.bcm-heading-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-notebook .bcm-notebook-title { margin-inline-end: auto; font-size: 20px; line-height: 1.3; font-weight: 650; }\n.bcm-version { color: var(--bcm-accent); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notebook .bcm-subtitle { margin-block: 8px 12px; color: var(--bcm-muted); font-size: 14px; }\n.bcm-toolbar { display: flex; flex-wrap: wrap; gap: 8px; }\n.bcm-notebook .bcm-button {\n    appearance: none;\n    display: inline-flex;\n    justify-content: center;\n    align-items: center;\n    gap: 6px;\n    min-height: 36px;\n    max-width: 100%;\n    padding: 7px 11px;\n    border: 1px solid var(--bcm-line);\n    border-radius: 7px;\n    color: var(--bcm-text);\n    background: var(--bcm-panel);\n    font-size: 13px;\n    line-height: 1.3;\n    text-align: center;\n    text-decoration: none;\n    overflow-wrap: anywhere;\n    cursor: pointer;\n}\n.bcm-notebook .bcm-button:hover:not(:disabled) { background: #2b3c4e; border-color: #7891aa; }\n.bcm-notebook .bcm-button-primary { color: var(--bcm-accent-ink); background: var(--bcm-accent); border-color: transparent; font-weight: 650; }\n.bcm-notebook .bcm-button-primary:hover:not(:disabled) { background: #a0e3ff; border-color: transparent; }\n.bcm-notebook .bcm-button-quiet { background: transparent; border-color: transparent; color: var(--bcm-muted); }\n.bcm-notebook .bcm-delete:hover:not(:disabled) { color: var(--bcm-error); background: #452d32; border-color: transparent; }\n.bcm-notebook-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: #657c92 var(--bcm-surface); scrollbar-width: thin; }\n.bcm-notebook-scroll::-webkit-scrollbar { width: 8px; }\n.bcm-notebook-scroll::-webkit-scrollbar-track { background: var(--bcm-surface); }\n.bcm-notebook-scroll::-webkit-scrollbar-thumb { background: #657c92; border-radius: 8px; border: 2px solid var(--bcm-surface); }\n.bcm-filters { padding: 18px; display: grid; gap: 12px; }\n.bcm-field { display: grid; gap: 6px; min-width: 0; }\n.bcm-label { color: var(--bcm-muted); font-size: 12px; line-height: 1.4; }\n.bcm-filter-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }\n.bcm-notebook .bcm-input, .bcm-notebook .bcm-select {\n    appearance: auto;\n    display: block;\n    width: 100%;\n    min-width: 0;\n    max-width: 100%;\n    min-height: 38px;\n    padding: 8px 10px;\n    border: 1px solid var(--bcm-line);\n    border-radius: 7px;\n    color: var(--bcm-text);\n    background: var(--bcm-field);\n    caret-color: var(--bcm-accent);\n    font-size: 14px;\n    line-height: 1.5;\n}\n.bcm-notebook .bcm-input::placeholder { color: #a3b7ce; opacity: 1; }\n.bcm-notebook textarea.bcm-input { min-height: 86px; resize: vertical; overflow-wrap: anywhere; }\n.bcm-summary-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-result-summary { flex: 1; color: var(--bcm-muted); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notices, .bcm-undo { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 18px 16px; padding: 12px; background: #233747; border-radius: 8px; overflow-wrap: anywhere; }\n.bcm-notices > span, .bcm-undo > span { flex: 1 1 180px; }\n.bcm-notice-error { color: var(--bcm-error); background: #3b272d; }\n.bcm-import-preview { margin: 0 18px 18px; padding: 14px; background: var(--bcm-panel); border-radius: 8px; overflow-wrap: anywhere; }\n.bcm-notebook .bcm-import-preview h3 { font-size: 16px; margin-block-end: 8px; }\n.bcm-notebook .bcm-import-preview p { margin-block-end: 12px; }\n.bcm-note-list { padding-inline: 18px; }\n.bcm-note { display: grid; gap: 12px; padding-block: 20px 22px; border-block-start: 1px solid var(--bcm-line); min-width: 0; }\n.bcm-note-header { display: flex; align-items: start; gap: 10px; min-width: 0; }\n.bcm-notebook .bcm-note-title { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 15px; line-height: 1.5; font-weight: 600; }\n.bcm-note-header .bcm-button { flex-shrink: 0; }\n.bcm-note-meta { color: var(--bcm-muted); font-size: 12px; overflow-wrap: anywhere; }\n.bcm-image-placeholder { display: grid; align-items: center; min-height: 80px; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 8px; color: var(--bcm-muted); background: #0c121a; font-size: 13px; text-align: center; }\n.bcm-note-image { display: block; width: 100%; height: 100%; object-fit: contain; }\n.bcm-playback-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-play-button { font-variant-numeric: tabular-nums; }\n.bcm-note-bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, 1fr); align-items: end; gap: 12px; }\n.bcm-save-state { padding-block-end: 10px; color: var(--bcm-muted); font-size: 12px; text-align: end; overflow-wrap: anywhere; }\n.bcm-save-error { color: var(--bcm-error); }\n.bcm-empty { padding: 28px 8px 36px; color: var(--bcm-muted); overflow-wrap: anywhere; }\n.bcm-notebook .bcm-empty h3 { color: var(--bcm-text); font-size: 16px; margin-block-end: 10px; }\n.bcm-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 14px 18px; border-block-start: 1px solid var(--bcm-line); }\n.bcm-page-label { color: var(--bcm-muted); font-size: 12px; font-variant-numeric: tabular-nums; }\n.bcm-notebook .bcm-storage-note { padding: 16px 18px 22px; color: var(--bcm-muted); font-size: 12px; overflow-wrap: anywhere; }\n.bcm-due-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 16px 18px 0; padding: 12px 14px; border-radius: 8px; background: var(--bcm-panel); }\n.bcm-due-text { flex: 1 1 160px; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }\n.bcm-session { display: grid; gap: 14px; padding: 18px; }\n.bcm-session-top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }\n.bcm-session-progress { color: var(--bcm-muted); font-size: 13px; font-variant-numeric: tabular-nums; }\n.bcm-session-card { display: grid; gap: 14px; min-width: 0; padding: 16px; border-radius: 10px; background: var(--bcm-panel); }\n.bcm-notebook .bcm-session-title { font-size: 17px; line-height: 1.4; font-weight: 650; overflow-wrap: anywhere; }\n.bcm-session-hint { color: var(--bcm-muted); font-size: 13px; overflow-wrap: anywhere; }\n.bcm-session-answer { display: grid; gap: 10px; padding-block-start: 14px; border-block-start: 1px solid var(--bcm-line); }\n.bcm-session-note { white-space: pre-wrap; overflow-wrap: anywhere; }\n.bcm-session-tags { color: var(--bcm-muted); font-size: 12px; overflow-wrap: anywhere; }\n.bcm-ratings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }\n.bcm-notebook .bcm-rating { flex-direction: column; gap: 3px; padding: 9px 6px; }\n.bcm-rating-label { display: inline-flex; align-items: center; gap: 7px; font-weight: 650; }\n.bcm-rating kbd { padding: 1px 5px; border: 1px solid var(--bcm-line); border-radius: 4px; color: var(--bcm-muted); font: 600 11px/1.4 ui-monospace, Consolas, system-ui, monospace; }\n.bcm-rating small { color: var(--bcm-muted); font-size: 12px; }\n.bcm-nowrap { white-space: nowrap; }\n.bcm-notebook .bcm-rating[data-rating="again"] { border-color: #b86b75; }\n.bcm-notebook .bcm-rating[data-rating="good"] { border-color: #55b892; }\n@media (max-width: 440px) {\n    .bcm-notebook { width: 100%; }\n    .bcm-notebook-header { padding: 12px; }\n    .bcm-filters { padding: 14px 12px; }\n    .bcm-note-list { padding-inline: 12px; }\n    .bcm-notices, .bcm-undo, .bcm-import-preview, .bcm-due-bar { margin-inline: 12px; }\n    .bcm-session { padding: 14px 12px; }\n    .bcm-notebook .bcm-input, .bcm-notebook .bcm-select { font-size: 16px; }\n    .bcm-toolbar { gap: 6px; }\n}\n@media (max-height: 420px) {\n    .bcm-notebook-header { padding-block: 10px; }\n    .bcm-notebook .bcm-subtitle { display: none; }\n    .bcm-notebook-header .bcm-toolbar { margin-block-start: 8px; }\n}\n@media (prefers-reduced-motion: reduce) {\n    .bcm-notebook *, .bcm-notebook *::before, .bcm-notebook *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }\n}\n@media (forced-colors: active) {\n    .bcm-notebook { border: 1px solid CanvasText; }\n    .bcm-notebook :focus-visible { outline-color: Highlight; }\n    .bcm-notebook .bcm-button { border: 1px solid ButtonText; }\n}\n';
 
   // src/main.js
-  var VERSION = "2.4.1";
+  var VERSION = "2.5.0";
   var clamp = (n, low, high) => Math.max(low, Math.min(high, n));
-  function getDeepActiveElement(doc = document) {
-    let active = doc?.activeElement;
-    while (active?.shadowRoot?.activeElement) {
-      active = active.shadowRoot.activeElement;
-    }
-    return active;
-  }
-  function isEditableNode(node2) {
-    if (!node2) return false;
-    const el2 = node2.nodeType === 3 ? node2.parentElement : node2.nodeType === 1 ? node2 : null;
-    if (!el2) return false;
-    if (el2.isContentEditable) return true;
-    const tag = (el2.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea" || tag === "select") return true;
-    const role = el2.getAttribute?.("role");
-    if (role === "textbox" || role === "searchbox" || role === "combobox") return true;
-    const ce = el2.getAttribute?.("contenteditable");
-    if (ce != null && ce !== "false") return true;
-    if (tag === "bili-comment-box" || tag === "bili-comment-reply-box" || tag === "bili-comments-box-root" || tag === "bili-comment-editor") return true;
-    if (el2.classList?.contains("ProseMirror") || el2.classList?.contains("comment-send-box") || el2.classList?.contains("reply-box") || el2.classList?.contains("bili-comment-box")) return true;
-    if (el2.closest?.('input,textarea,select,[role="textbox"],[role="searchbox"],[role="combobox"],[contenteditable]:not([contenteditable="false"]),bili-comment-box,bili-comment-reply-box,bili-comments-box-root,.comment-send-box,.reply-box,.bili-comment-box')) return true;
-    return false;
-  }
-  function editable(targetOrEvent) {
-    if (!targetOrEvent) return false;
-    const doc = typeof document !== "undefined" ? document : null;
-    if (doc) {
-      if (isEditableNode(getDeepActiveElement(doc))) return true;
-      if (isEditableNode(doc.activeElement)) return true;
-    }
-    if (typeof targetOrEvent.composedPath === "function" || "target" in targetOrEvent) {
-      const event = targetOrEvent;
-      if (isEditableNode(event.target)) return true;
-      if (typeof event.composedPath === "function") {
-        const path = event.composedPath();
-        for (let i = 0; i < path.length; i++) {
-          if (isEditableNode(path[i])) return true;
-        }
-      }
-      return false;
-    }
-    return isEditableNode(targetOrEvent);
-  }
   function el(tag, className, text2) {
     const node2 = document.createElement(tag);
     if (className) node2.className = className;
@@ -2539,9 +3013,13 @@
     style.textContent = app_default + "\n" + notebook_default;
     (document.head || document.documentElement).append(style);
     document.body.append(root);
-    let local;
+    let local, session;
     try {
       local = window.localStorage;
+    } catch {
+    }
+    try {
+      session = window.sessionStorage;
     } catch {
     }
     const gmGet = typeof GM_getValue === "function" ? GM_getValue : void 0;
@@ -2551,7 +3029,7 @@
     const player = createPlayerAdapter({ window, document });
     let snapshot = null, config, container, mask, dock, resizeObserver, mountAbort;
     let edit = false, peek = false, wheeling = false, captureBusy = false, initialized = false;
-    let hideTimer, wheelTimer, saveTimer, toastTimer, frame, drag, configSeries;
+    let hideTimer, wheelTimer, saveTimer, toastTimer, dueTimer, frame, drag, configSeries;
     let countGeneration = 0, panelReturnFocus;
     let geometryDirty = false;
     const notification = el("div", "bcm-notification");
@@ -2598,7 +3076,8 @@
         ["悬停遮罩 / 按住 Alt", "临时看清中文，移开或松键恢复。"],
         ["Alt + Z / Shift + Z", "进入或退出拖动、拉伸模式。"],
         ["Alt + C / Shift + C", "开关中文字幕遮罩。"],
-        ["循环复听", "以收藏点前后几秒为区间，完成后返回开始复习前的进度。"]
+        ["循环复听", "以收藏点前后几秒为区间，完成后返回开始复习前的进度。"],
+        ["到期复习", "复习本顶部点“开始复习”：先听、回想，空格显示答案，再按 1 / 2 / 3 自评，下次复习按间隔排期。"]
       ]) list.append(el("dt", "", key), el("dd", "", desc));
       panel.append(list, el("p", "", "收藏只保存在当前浏览器的本机数据中。建议定期在复习本导出 JSON 备份；HTML 用于离线阅读。"));
       const done = button2("开始看剧", closePanel, "bcm-primary");
@@ -2648,6 +3127,7 @@
       add("loopCount", "循环次数", "number", 1, 20);
       add("loopGap", "循环间隔（秒）", "number", 0, 10, 0.5);
       add("playbackRate", "复听倍速", "number", 0.5, 2, 0.25);
+      add("reviewBatch", "每组复习条数", "number", 5, 100);
       const actions = el("div", "bcm-panel-actions");
       const submit = el("button", "bcm-primary", "保存设置");
       submit.type = "submit";
@@ -2696,24 +3176,32 @@
       notify,
       version: VERSION,
       onChange: updateCount,
+      sessionStorage: session,
       getLeadIn: () => settings.get(snapshot?.identity.seriesId || "global_default").leadIn,
+      getBatchSize: () => settings.get(snapshot?.identity.seriesId || "global_default").reviewBatch,
       onHelp: showHelp,
       onSettings: showSettings,
       onLoop: async (note) => {
         config = settings.get(snapshot?.identity.seriesId || note.seriesId);
-        await review.start(note, { before: config.loopBefore, after: config.loopAfter, count: config.loopCount, gap: config.loopGap, rate: config.playbackRate });
+        return review.start(note, { before: config.loopBefore, after: config.loopAfter, count: config.loopCount, gap: config.loopGap, rate: config.playbackRate });
       }
     });
     root.append(notebook.element);
     async function updateCount() {
       const generation = ++countGeneration;
       const sid = snapshot?.identity.seriesId;
+      clearTimeout(dueTimer);
       if (!sid) return;
       try {
-        const total = await repo.count(sid);
-        if (generation === countGeneration && dock) dock.querySelector('[data-action="notebook"]').textContent = `复习本 ${total}`;
+        const [total, due] = await Promise.all([repo.count(sid), repo.countDue(sid)]);
+        if (generation === countGeneration && dock) dock.querySelector('[data-action="notebook"]').textContent = due > 0 ? `待复习 ${due}` : `复习本 ${total}`;
       } catch {
       }
+      dueTimer = setTimeout(refreshDue, Math.min(Math.max(nextRollover() - Date.now() + 1e3, 1e3), 2147483647));
+    }
+    function refreshDue() {
+      updateCount();
+      notebook.refreshDue();
     }
     function saveGeometry() {
       clearTimeout(saveTimer);
@@ -2974,6 +3462,7 @@
             player.getCurrent()?.media.play?.().catch(() => notify("已定位收藏片段，点击播放继续"));
           }
         }).catch(fail2);
+        notebook.resumeSession().catch(fail2);
         try {
           if (!local?.getItem("bili_caption_welcome_v240")) {
             notify(`v${VERSION} 已就绪 · S 收藏，B 打开复习本；帮助中可查看全部操作`, { duration: 6e3 });
@@ -2986,7 +3475,7 @@
     });
     const events = new AbortController();
     window.addEventListener("wheel", (event) => {
-      if (!snapshot || !event.altKey || event.ctrlKey || event.metaKey || !config.enabled || edit || editable(event) || !container.contains(event.target) || !event.deltaY) return;
+      if (!snapshot || !event.altKey || event.ctrlKey || event.metaKey || !config.enabled || edit || isEditableEvent(event) || !container.contains(event.target) || !event.deltaY) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       config.top = clamp(config.top + (event.deltaY > 0 ? 0.5 : -0.5), 0, 100 - config.height);
@@ -3017,7 +3506,7 @@
         }
         return;
       }
-      if (!snapshot || editable(event) || event.isComposing || event.ctrlKey || event.metaKey) return;
+      if (!snapshot || isEditableEvent(event) || event.isComposing || event.ctrlKey || event.metaKey) return;
       if (event.key === "Alt") {
         peek = true;
         paint();
@@ -3059,6 +3548,7 @@
       if (!document.hidden && snapshot) {
         config = settings.get(configSeries);
         paint();
+        refreshDue();
       }
     }, { signal: events.signal });
     window.addEventListener("pagehide", () => {
@@ -3074,7 +3564,7 @@
       events.abort();
       mountAbort?.abort();
       resizeObserver?.disconnect();
-      for (const timer of [hideTimer, wheelTimer, saveTimer, toastTimer]) clearTimeout(timer);
+      for (const timer of [hideTimer, wheelTimer, saveTimer, toastTimer, dueTimer]) clearTimeout(timer);
       if (frame != null) cancelAnimationFrame(frame);
     }, { once: true });
   }

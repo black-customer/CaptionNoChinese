@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createNotebook } from '../src/notebook.js';
+import { isDue, schedule } from '../src/schedule.js';
+
+// A fixed evening, so due dates and navigation markers do not depend on when the suite runs.
+const NOW = new Date(2026, 10, 24, 21, 30).getTime();
+const SESSION_KEY = 'bili_caption_review_session';
 
 // A small event/DOM fixture for notebook orchestration, not a browser or layout test.
 class FixtureNode {
@@ -14,6 +19,8 @@ class FixtureNode {
             if (enabled) tokens.add(name); else tokens.delete(name);
             this.className = [...tokens].join(' ');
         } };
+        // Nodes link back to their document, so a failed assertion must not print the whole tree.
+        this[Symbol.for('nodejs.util.inspect.custom')] = () => `<${this.tagName.toLowerCase()}${this.className ? ` class="${this.className}"` : ''}>`;
     }
     append(...nodes) {
         for (const item of nodes) {
@@ -36,7 +43,9 @@ class FixtureNode {
     }
     removeEventListener(type, callback) { this.listeners.get(type)?.delete(callback); }
     async emit(type, extra = {}) {
-        await Promise.all([...this.listeners.get(type) || []].map(callback => callback({ target: this, ...extra })));
+        await Promise.all([...this.listeners.get(type) || []].map(callback => callback({
+            target: this, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() {}, ...extra
+        })));
     }
     click() { return this.disabled ? Promise.resolve() : this.emit('click'); }
     focus() { this.ownerDocument.activeElement = this; }
@@ -50,6 +59,14 @@ function find(root, predicate) {
 }
 const byClass = (root, name) => find(root, item => item.className.split(' ').includes(name));
 const byText = (root, text) => find(root, item => item.tagName === 'BUTTON' && item.textContent === text);
+const sessionOf = notebook => byClass(notebook.element, 'bcm-session');
+const choice = (root, rating) => find(root, item => item.dataset.rating === rating);
+const scene = (id, createdAt, extra = {}) => ({
+    id, seriesId: 'series_1', seriesTitle: 'Friends', epTitle: `Episode ${id.slice(-1)}`,
+    source: { url: 'https://www.bilibili.com/video/BV1xx411c7mD/', sourceId: 'source_1' },
+    time: 42, timeStr: '00:42', userNote: `note ${id}`, tags: [], reviewState: 'new', createdAt, updatedAt: createdAt, ...extra
+});
+const FAR = scene('note_far', 1, { epTitle: 'Episode 9', source: { url: 'https://www.bilibili.com/video/BV1xx411c7mD/?p=2', sourceId: 'source_2' } });
 const deferred = () => {
     let resolve; let reject;
     const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -87,10 +104,16 @@ function setup(t, overrides = {}) {
         list: async () => ({ notes: [{ ...note }], total: 1 }),
         get: async () => ({ ...note }),
         update: async (id, patch) => { updates.push({ id, patch }); Object.assign(note, patch); },
-        remove: async () => ({ ...note }), restore: async () => {}, ...overrides.repo
+        remove: async () => ({ ...note }), restore: async () => {}, countDue: async () => 0, review: async () => {}, ...overrides.repo
     };
     const player = { getCurrent: () => ({ identity: { seriesId: 'series_1', source: { sourceId: 'source_1' } }, sourceReady: true, media: { play: async () => { playCount += 1; } } }), seek: async (...args) => { seeks.push(args); return { navigated: false }; } };
-    const notebook = createNotebook({ repo, player, getLeadIn: overrides.getLeadIn, notify: value => messages.push(value), onChange: () => { changeCount += 1; } });
+    const values = new Map();
+    const store = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)), removeItem: key => values.delete(key) };
+    const options = {
+        repo, player, notify: value => messages.push(value), onChange: () => { changeCount += 1; }, getLeadIn: overrides.getLeadIn, now: () => NOW,
+        sessionStorage: store, ...overrides.notebook
+    };
+    const notebook = createNotebook(options);
     document.body.append(notebook.element);
     t.after(async () => {
         await notebook.dispose();
@@ -98,8 +121,32 @@ function setup(t, overrides = {}) {
         globalThis.window = previous.window;
         globalThis.IntersectionObserver = previous.observer;
     });
-    return { notebook, repo, player, note, updates, seeks, messages, document, window, observers, changes: () => changeCount, plays: () => playCount };
+    return {
+        notebook, repo, player, note, updates, seeks, messages, document, window, observers, store, changes: () => changeCount, plays: () => playCount,
+        create: (extra = {}) => createNotebook({ ...options, ...extra })
+    };
 }
+
+/** Cards that follow the real scheduler, so a sitting behaves as it does over IndexedDB. */
+function sitting(t, cards, overrides = {}) {
+    const fixture = setup(t, { ...overrides, repo: { countDue: async () => cards.filter(card => isDue(card, NOW)).length, ...overrides.repo } });
+    const ratings = [];
+    fixture.repo.list = async options => options.status === 'due'
+        ? { notes: cards.filter(card => isDue(card, NOW)), total: cards.length }
+        : { notes: [{ ...fixture.note }], total: 1 };
+    fixture.repo.get = async id => { const card = cards.find(item => item.id === id); return card ? { ...card } : null; };
+    fixture.repo.review = async (id, rating) => {
+        const card = cards.find(item => item.id === id);
+        ratings.push(`${id}:${rating}`);
+        Object.assign(card, schedule(card, rating, NOW));
+        return { ...card };
+    };
+    return { ...fixture, cards, ratings };
+}
+
+const onFarPage = fixture => {
+    fixture.player.getCurrent = () => ({ identity: { seriesId: 'series_1', source: { sourceId: 'source_2' } }, sourceReady: true, media: { play: async () => {} } });
+};
 
 test('editing during a pending save serializes the next patch and keeps the latest text', async t => {
     const firstCommit = deferred(); const calls = [];
@@ -240,6 +287,285 @@ test('oversized backup is rejected before reading or parsing its contents', asyn
     const input = find(fixture.notebook.element, item => item.type === 'file');
     input.files = [{ name: 'too-large.json', size: 151 * 1024 * 1024, text: () => assert.fail('must not read oversized file') }];
     await input.emit('change');
-    const notice = byClass(fixture.notebook.element, 'bcm-notices');
-    assert.match(notice.children[0].textContent, /超过 150 MiB/);
+  const notice = byClass(fixture.notebook.element, 'bcm-notices');
+  assert.match(notice.children[0].textContent, /超过 150 MiB/);
+});
+
+test('due cards become a sitting that reveals, rates and advances one card at a time', async t => {
+    const fixture = sitting(t, [scene('note_1', 1, { userNote: 'the first note' }), scene('note_2', 2)]);
+    const { notebook } = fixture;
+    await notebook.open();
+    assert.match(byClass(notebook.element, 'bcm-due-text').textContent, /有 2 条收藏到期/);
+    assert.equal(fixture.ratings.length, 0, 'opening the notebook records nothing');
+    await byText(notebook.element, '开始复习').click();
+    const view = sessionOf(notebook);
+    assert.equal(view.hidden, false);
+    assert.equal(byClass(notebook.element, 'bcm-note-list').hidden, true);
+    assert.match(byClass(view, 'bcm-session-progress').textContent, /还剩 2 条/);
+    assert.equal(byClass(view, 'bcm-session-title').textContent, 'Episode 1 · 00:42');
+    assert.equal(byClass(view, 'bcm-session-answer').hidden, true);
+    assert.equal(byClass(view, 'bcm-ratings').hidden, true);
+    await byText(view, '显示答案').click();
+    assert.equal(byClass(view, 'bcm-session-answer').hidden, false);
+    assert.match(byClass(view, 'bcm-session-note').textContent, /the first note/);
+    assert.equal(byClass(view, 'bcm-ratings').hidden, false);
+    assert.deepEqual(fixture.ratings, [], 'revealing is not a rating');
+    assert.equal(choice(view, 'good').attributes.get('aria-label'), '听懂了，1 天后再来');
+    const changes = fixture.changes();
+    await choice(view, 'good').click();
+    assert.deepEqual(fixture.ratings, ['note_1:good']);
+    assert.ok(fixture.changes() > changes, 'the player badge is told to refresh');
+    assert.equal(byClass(view, 'bcm-session-title').textContent, 'Episode 2 · 00:42');
+    assert.equal(byClass(view, 'bcm-session-answer').hidden, true, 'the next card starts hidden');
+});
+
+test('a card that was not understood comes back later in the sitting, which then summarizes', async t => {
+    const fixture = sitting(t, [scene('note_1', 1), scene('note_2', 2), scene('note_3', 3)]);
+    const view = sessionOf(fixture.notebook);
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    await byText(view, '显示答案').click(); await choice(view, 'again').click();
+    assert.equal(byClass(view, 'bcm-session-title').textContent, 'Episode 2 · 00:42');
+    await byText(view, '显示答案').click(); await choice(view, 'good').click();
+    await byText(view, '显示答案').click(); await choice(view, 'hard').click();
+    assert.equal(byClass(view, 'bcm-session-title').textContent, 'Episode 1 · 00:42');
+    assert.match(byClass(view, 'bcm-session-progress').textContent, /还剩 1 条/);
+    await byText(view, '显示答案').click(); await choice(view, 'good').click();
+    assert.equal(byClass(view, 'bcm-session-title').textContent, '本轮复习完成');
+    assert.match(byClass(view, 'bcm-session-hint').textContent, /复习了 3 条收藏：听懂了 2，费劲 1，没听懂 1/);
+    assert.equal(fixture.store.getItem(SESSION_KEY), null);
+    assert.deepEqual(fixture.ratings, ['note_1:again', 'note_2:good', 'note_3:hard', 'note_1:good']);
+    await byText(view, '返回复习本').click();
+    assert.equal(view.hidden, true);
+    assert.equal(byClass(fixture.notebook.element, 'bcm-note-list').hidden, false);
+    assert.equal(byClass(fixture.notebook.element, 'bcm-due-bar').hidden, true, 'nothing is left to review');
+});
+
+test('a sitting takes at most the configured number of cards, and another can follow', async t => {
+    const fixture = sitting(t, [scene('note_1', 1), scene('note_2', 2)], { notebook: { getBatchSize: () => 1 } });
+    const view = sessionOf(fixture.notebook);
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    assert.match(byClass(view, 'bcm-session-progress').textContent, /还剩 1 条/);
+    await byText(view, '显示答案').click(); await choice(view, 'good').click();
+    assert.equal(byClass(view, 'bcm-session-title').textContent, '本轮复习完成');
+    await byText(view, '再来一组').click();
+    assert.equal(byClass(view, 'bcm-session-title').textContent, 'Episode 2 · 00:42');
+});
+
+test('closing mid-sitting keeps the place and offers to continue', async t => {
+    const fixture = sitting(t, [scene('note_1', 1), scene('note_2', 2), scene('note_3', 3)]);
+    const view = sessionOf(fixture.notebook);
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    await byText(view, '显示答案').click(); await choice(view, 'good').click();
+    assert.equal(JSON.parse(fixture.store.getItem(SESSION_KEY)).index, 1);
+    await fixture.notebook.close();
+    assert.notEqual(fixture.store.getItem(SESSION_KEY), null);
+    await fixture.notebook.open();
+    assert.match(byClass(fixture.notebook.element, 'bcm-due-text').textContent, /上次复习还剩 2 条/);
+    assert.equal(view.hidden, true, 'reopening shows the list first');
+    await byText(fixture.notebook.element, '继续复习').click();
+    assert.equal(byClass(view, 'bcm-session-title').textContent, 'Episode 2 · 00:42');
+    await byText(view, '结束复习').click();
+    assert.equal(view.hidden, true);
+    assert.equal(JSON.parse(fixture.store.getItem(SESSION_KEY)).index, 1);
+});
+
+test('cards deleted or reviewed elsewhere are skipped when a sitting resumes', async t => {
+    const fixture = sitting(t, [scene('note_1', 1), scene('note_2', 2)]);
+    const get = fixture.repo.get;
+    fixture.repo.get = async id => id === 'note_1' ? null : get(id);
+    const view = sessionOf(fixture.notebook);
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    assert.equal(byClass(view, 'bcm-session-title').textContent, 'Episode 2 · 00:42');
+    await fixture.notebook.close();
+    Object.assign(fixture.cards[1], schedule(fixture.cards[1], 'good', NOW));
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '继续复习').click();
+    assert.equal(byClass(view, 'bcm-session-title').textContent, '本轮复习完成');
+    assert.deepEqual(fixture.ratings, []);
+});
+
+test('space reveals and 1 / 2 / 3 rate, only while a card is showing and only after the answer', async t => {
+    const fixture = sitting(t, [scene('note_1', 1)]);
+    const view = sessionOf(fixture.notebook);
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    await fixture.window.emit('keydown', { key: '3' });
+    assert.deepEqual(fixture.ratings, [], 'a hidden answer cannot be rated');
+    await fixture.window.emit('keydown', { key: ' ' });
+    assert.equal(byClass(view, 'bcm-session-answer').hidden, false);
+    await fixture.window.emit('keydown', { key: '3', repeat: true });
+    assert.deepEqual(fixture.ratings, [], 'a held key does not rate');
+    await fixture.window.emit('keydown', { key: '3' });
+    assert.deepEqual(fixture.ratings, ['note_1:good']);
+    assert.equal(byClass(view, 'bcm-session-title').textContent, '本轮复习完成');
+    await fixture.notebook.close();
+    await fixture.window.emit('keydown', { key: ' ' });
+});
+
+test('session shortcuts ignore editable inputs and shadow DOM editors for Space and 1 / 2 / 3', async t => {
+    const fixture = sitting(t, [scene('note_1', 1)]);
+    const view = sessionOf(fixture.notebook);
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    const input = fixture.document.createElement('input');
+    fixture.document.body.append(input);
+    input.focus();
+    const spaceInInput = { key: ' ', target: input, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() {} };
+    await fixture.window.emit('keydown', spaceInInput);
+    assert.equal(byClass(view, 'bcm-session-answer').hidden, true, 'Space inside input does not reveal');
+    assert.equal(spaceInInput.defaultPrevented, false);
+
+    const host = fixture.document.createElement('bili-comments');
+    const editor = fixture.document.createElement('div');
+    editor.setAttribute('contenteditable', 'true');
+    editor.setAttribute('role', 'textbox');
+    host.shadowRoot = { activeElement: editor };
+    fixture.document.body.append(host);
+    host.focus();
+    const spaceInShadow = { key: ' ', target: host, composedPath: () => [editor, host, fixture.document.body, fixture.window], defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() {} };
+    await fixture.window.emit('keydown', spaceInShadow);
+    assert.equal(byClass(view, 'bcm-session-answer').hidden, true, 'Space inside shadow DOM editor does not reveal');
+    assert.equal(spaceInShadow.defaultPrevented, false);
+
+    await byText(view, '显示答案').click();
+    input.focus();
+    const digitInInput = { key: '3', target: input, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() {} };
+    await fixture.window.emit('keydown', digitInInput);
+    assert.deepEqual(fixture.ratings, [], '1 / 2 / 3 inside input does not rate');
+    assert.equal(digitInInput.defaultPrevented, false);
+
+    host.focus();
+    const digitInShadow = { key: '2', target: host, composedPath: () => [editor, host, fixture.document.body, fixture.window], defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() {} };
+    await fixture.window.emit('keydown', digitInShadow);
+    assert.deepEqual(fixture.ratings, [], '1 / 2 / 3 inside shadow DOM editor does not rate');
+    assert.equal(digitInShadow.defaultPrevented, false);
+
+    byClass(view, 'bcm-session-title').focus();
+    await fixture.window.emit('keydown', { key: '3' });
+    assert.deepEqual(fixture.ratings, ['note_1:good']);
+});
+
+test('a rating that cannot be saved keeps the card on screen and can be retried', async t => {
+    const fixture = sitting(t, [scene('note_1', 1)]);
+    const view = sessionOf(fixture.notebook);
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    await byText(view, '显示答案').click();
+    let fail = true;
+    fixture.repo.review = async () => { if (fail) throw new Error('quota exceeded'); };
+    await choice(view, 'good').click();
+    assert.match(byClass(fixture.notebook.element, 'bcm-notices').children[0].textContent, /自评没有保存：quota exceeded/);
+    assert.equal(byClass(view, 'bcm-session-title').textContent, 'Episode 1 · 00:42');
+    assert.equal(JSON.parse(fixture.store.getItem(SESSION_KEY)).index, 0);
+    assert.equal(choice(view, 'good').disabled, false);
+    fail = false;
+    await choice(view, 'good').click();
+    assert.equal(byClass(view, 'bcm-session-title').textContent, '本轮复习完成');
+});
+
+test('leaving for another video marks the sitting, and the next page resumes it', async t => {
+    const fixture = sitting(t, [FAR]);
+    let navigations = 0;
+    fixture.player.seek = async () => { navigations += 1; return { navigated: true }; };
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    const view = sessionOf(fixture.notebook);
+    assert.match(byClass(view, 'bcm-session-hint').textContent, /其他视频/);
+    await byClass(view, 'bcm-play-button').click();
+    assert.equal(navigations, 1);
+    assert.equal(JSON.parse(fixture.store.getItem(SESSION_KEY)).pending, 'listen');
+    onFarPage(fixture);
+    const next = fixture.create();
+    fixture.document.body.append(next.element);
+    assert.equal(await next.resumeSession(), true);
+    assert.equal(next.isOpen(), true);
+    assert.equal(sessionOf(next).hidden, false);
+    assert.equal(byClass(sessionOf(next), 'bcm-session-title').textContent, 'Episode 9 · 00:42');
+    assert.equal(JSON.parse(fixture.store.getItem(SESSION_KEY)).pending, null);
+    await next.dispose();
+});
+
+test('a loop requested across videos starts by itself once the next page is ready', async t => {
+    let navigated = true;
+    const loops = [];
+    const fixture = sitting(t, [FAR], { notebook: {
+        onLoop: async note => { loops.push(`${note.id}:${navigated ? 'navigated' : 'here'}`); return { navigated }; }
+    } });
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    await byText(sessionOf(fixture.notebook), '片段循环').click();
+    assert.deepEqual(loops, ['note_far:navigated']);
+    assert.equal(JSON.parse(fixture.store.getItem(SESSION_KEY)).pending, 'loop');
+    navigated = false;
+    onFarPage(fixture);
+    const next = fixture.create();
+    fixture.document.body.append(next.element);
+    await next.resumeSession();
+    assert.deepEqual(loops, ['note_far:navigated', 'note_far:here']);
+    assert.equal(JSON.parse(fixture.store.getItem(SESSION_KEY)).pending, null);
+    await next.dispose();
+});
+
+test('a stale navigation marker is dropped, and playing on the same video leaves no marker', async t => {
+    const fixture = sitting(t, [scene('note_1', 1)]);
+    fixture.store.setItem(SESSION_KEY, JSON.stringify({ queue: ['note_1'], index: 0, again: 0, hard: 0, good: 0, pending: 'listen', pendingAt: NOW - 3 * 60 * 1000 }));
+    const stale = fixture.create();
+    fixture.document.body.append(stale.element);
+    assert.equal(await stale.resumeSession(), false);
+    assert.equal(stale.isOpen(), false);
+    assert.equal(JSON.parse(fixture.store.getItem(SESSION_KEY)).pending, null);
+    await stale.dispose();
+    fixture.store.setItem(SESSION_KEY, '{not json');
+    const corrupt = fixture.create();
+    assert.equal(await corrupt.resumeSession(), false);
+    await corrupt.dispose();
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    await byClass(sessionOf(fixture.notebook), 'bcm-play-button').click();
+    assert.equal(fixture.seeks.length, 1);
+    assert.equal(fixture.plays(), 1);
+    assert.equal(fixture.document.activeElement, byClass(sessionOf(fixture.notebook), 'bcm-session-title'), 'focus returns to the card so that space reveals');
+    assert.equal(fixture.store.getItem(SESSION_KEY).indexOf('"pending":null') > 0, true);
+});
+
+test('the scene is part of the answer, and its object URL is released when the sitting moves on', async t => {
+    const fixture = sitting(t, [
+        scene('note_1', 1, { hasImage: true, imageBlob: new Blob(['picture'], { type: 'image/jpeg' }) }), scene('note_2', 2)
+    ]);
+    const oldCreate = URL.createObjectURL; const oldRevoke = URL.revokeObjectURL;
+    const revoked = [];
+    URL.createObjectURL = () => 'blob:test-session';
+    URL.revokeObjectURL = value => revoked.push(value);
+    t.after(() => { URL.createObjectURL = oldCreate; URL.revokeObjectURL = oldRevoke; });
+    const view = sessionOf(fixture.notebook);
+    const answer = () => byClass(view, 'bcm-session-answer').hidden;
+    await fixture.notebook.open();
+    await byText(fixture.notebook.element, '开始复习').click();
+    assert.equal(answer(), true, 'the scene waits for the answer');
+    await byText(view, '显示答案').click();
+    assert.equal(answer(), false);
+    assert.equal(byClass(view, 'bcm-note-image').src, 'blob:test-session');
+    await choice(view, 'good').click();
+    assert.deepEqual(revoked, ['blob:test-session']);
+    assert.equal(byClass(view, 'bcm-session-title').textContent, 'Episode 2 · 00:42');
+});
+
+test('the due filter queries due cards, and a manual status overrides the schedule', async t => {
+    const calls = [];
+    const fixture = setup(t);
+    fixture.repo.list = async options => { calls.push(options); return { notes: [{ ...fixture.note }], total: 1 }; };
+    await fixture.notebook.open();
+    const status = find(fixture.notebook.element, item => item.attributes.get('aria-label') === '复习状态');
+    assert.deepEqual(status.children.map(option => option.textContent), ['全部状态', '今日到期', '待复习', '学习中', '已掌握']);
+    status.value = 'due'; await status.emit('change'); await tick();
+    assert.equal(calls.at(-1).status, 'due');
+    const select = find(fixture.notebook.element, item => item.attributes.get('aria-label') === '这条收藏的复习状态');
+    select.value = 'mastered'; await select.emit('change');
+    assert.deepEqual(fixture.updates.at(-1).patch, { reviewState: 'mastered' });
+    select.value = 'learning'; await select.emit('change');
+    assert.deepEqual(fixture.updates.at(-1).patch, { reviewState: 'learning', dueAt: NOW });
 });

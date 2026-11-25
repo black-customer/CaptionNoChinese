@@ -11,7 +11,7 @@ async function boot(page) {
     body: route.request().url().includes('/__bcm__/bundle.js') ? script : fixture,
   }));
   await page.goto(url);
-  await expect(page.locator('#bcm-app')).toHaveAttribute('data-version', '2.4.1');
+  await expect(page.locator('#bcm-app')).toHaveAttribute('data-version', '2.5.0');
   await expect(page.locator('.bcm-dock')).toBeVisible();
   await page.waitForFunction(() => document.querySelector('video').readyState >= 2);
 }
@@ -27,6 +27,8 @@ test('capture, safely edit, reload, search, delete and undo retain a committed i
   const input=page.getByRole('textbox',{name:'笔记 / 答案'});
   await input.fill('<b>literal markup</b> tomorrow');
   await page.getByRole('button',{name:'关闭复习本',exact:true}).click();
+  // The notebook hides only after its drafts commit; reloading sooner abandons the write.
+  await expect(page.locator('.bcm-notebook')).toBeHidden();
   await page.reload();await dockClick(page,'notebook');
   await expect(input).toHaveValue('<b>literal markup</b> tomorrow');
   await expect(page.locator('.bcm-note b')).toHaveCount(0);
@@ -61,6 +63,123 @@ test('cross-part replay navigates to the recorded source before seeking', async 
   await page.locator('.bcm-note').getByRole('button',{name:/回听/}).first().click();
   await expect(page).toHaveURL(url);
   await expect.poll(()=>page.evaluate(()=>window.fixture.time)).toBe(39);
+});
+
+const sitting=page=>page.getByRole('region',{name:'复习会话'});
+async function startSitting(page){await page.getByRole('button',{name:'开始复习',exact:true}).click();await expect(sitting(page)).toBeVisible();}
+
+test('a due sitting replays, reveals, records a rating and schedules the next review',async({page})=>{
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await boot(page);await captureAndOpen(page);
+  await expect(page.locator('.bcm-dock [data-action="notebook"]')).toHaveText('待复习 1');
+  await expect(page.locator('.bcm-due-text')).toHaveText('有 1 条收藏到期，该复习了');
+  await startSitting(page);
+  await expect(page.locator('.bcm-note-list')).toBeHidden();
+  await expect(sitting(page).locator('.bcm-session-answer')).toBeHidden();
+  await expect(sitting(page).locator('.bcm-ratings')).toBeHidden();
+  await sitting(page).getByRole('button',{name:'回听',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>fixture.time)).toBe(39);
+  await mkdir('artifacts',{recursive:true});
+  await page.screenshot({path:'artifacts/review-sitting-hidden.png',fullPage:true});
+  // Space reveals once playback is requested; on the playback button it would replay instead.
+  await page.keyboard.press('Space');
+  await expect(sitting(page).locator('.bcm-session-answer')).toBeVisible();
+  await expect(sitting(page).locator('.bcm-note-image')).toBeVisible();
+  await expect(sitting(page).locator('.bcm-ratings')).toBeVisible();
+  await expect(page.getByRole('group',{name:'这次听得怎么样'}).getByRole('button',{name:'听懂了，1 天后再来',exact:true})).toBeVisible();
+  await page.screenshot({path:'artifacts/review-sitting-desktop.png',fullPage:true});
+  await page.setViewportSize({width:390,height:780});
+  await expect(sitting(page)).toBeVisible();
+  const overflow=await page.locator('.bcm-notebook').evaluate(el=>el.scrollWidth>el.clientWidth+1);expect(overflow).toBe(false);
+  for(const rating of await sitting(page).locator('.bcm-rating').all()){const bounds=await rating.boundingBox();expect(bounds.x).toBeGreaterThanOrEqual(-1);expect(bounds.x+bounds.width).toBeLessThanOrEqual(391);}
+  await page.screenshot({path:'artifacts/review-sitting-narrow.png',fullPage:true});
+  await page.setViewportSize({width:1280,height:850});
+  await sitting(page).getByRole('button',{name:/^听懂了/}).click();
+  await expect(sitting(page).locator('.bcm-session-title')).toHaveText('本轮复习完成');
+  await expect(sitting(page)).toContainText('复习了 1 条收藏：听懂了 1，费劲 0，没听懂 0');
+  await expect(page.locator('.bcm-dock [data-action="notebook"]')).toHaveText('复习本 1');
+  await page.getByRole('button',{name:'返回复习本',exact:true}).click();
+  await expect(page.locator('.bcm-due-bar')).toBeHidden();
+  await expect(page.getByLabel('这条收藏的复习状态')).toHaveValue('learning');
+  await expect(page.locator('.bcm-dock [data-action="notebook"]')).toBeVisible();
+  await page.reload();await dockClick(page,'notebook');
+  await expect(page.getByLabel('这条收藏的复习状态')).toHaveValue('learning');
+  await expect(page.locator('.bcm-due-bar')).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test('a sitting continues by itself after a review navigates to the recorded source',async({page})=>{
+  await boot(page);await captureAndOpen(page);
+  await page.getByRole('button',{name:'关闭复习本',exact:true}).click();
+  await page.getByRole('button',{name:'下一 P',exact:true}).click();
+  await expect(page).toHaveURL(/\?p=2/);await dockClick(page,'notebook');
+  await expect(page.locator('.bcm-due-text')).toHaveText('有 1 条收藏到期，该复习了');
+  await startSitting(page);
+  await expect(sitting(page)).toContainText('其他视频');
+  await sitting(page).getByRole('button',{name:'回听',exact:true}).click();
+  await expect(page).toHaveURL(url);
+  await expect(page.locator('.bcm-notebook')).toBeVisible();
+  await expect(sitting(page).locator('.bcm-session-title')).toHaveText('P1 · 00:42');
+  await expect.poll(()=>page.evaluate(()=>fixture.time)).toBe(39);
+  await expect(sitting(page).locator('.bcm-session-answer')).toBeHidden();
+  // Leaving before finishing keeps the place for the next visit.
+  await page.keyboard.press('Escape');await dockClick(page,'notebook');
+  await expect(page.locator('.bcm-due-text')).toHaveText('上次复习还剩 1 条');
+});
+
+test('a sitting loop navigates across parts and starts looping automatically', async ({ page }) => {
+  await boot(page); await captureAndOpen(page);
+  await page.getByRole('button', { name: '关闭复习本', exact: true }).click();
+  await page.getByRole('button', { name: '下一 P', exact: true }).click();
+  await expect(page).toHaveURL(/\?p=2/); await dockClick(page, 'notebook');
+  await startSitting(page);
+  await sitting(page).getByRole('button', { name: '片段循环', exact: true }).click();
+  await expect(page).toHaveURL(url);
+  await expect(page.locator('.bcm-notebook')).toBeVisible();
+  await expect(sitting(page).locator('.bcm-session-title')).toHaveText('P1 · 00:42');
+  await expect(page.locator('.bcm-loopbar')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => fixture.time)).toBe(39);
+});
+
+test('session Space and 1 / 2 / 3 shortcuts do not hijack settings inputs or shadow DOM comments', async ({ page }) => {
+  await boot(page); await captureAndOpen(page);
+  await page.evaluate(() => {
+    class MockReviewComments extends HTMLElement {
+      constructor() {
+        super();
+        const root = this.attachShadow({ mode: 'open' });
+        const box = document.createElement('bili-comment-box');
+        const boxRoot = box.attachShadow({ mode: 'open' });
+        const editor = document.createElement('div');
+        editor.className = 'ProseMirror';
+        editor.setAttribute('contenteditable', 'true');
+        editor.setAttribute('role', 'textbox');
+        boxRoot.append(editor);
+        root.append(box);
+      }
+    }
+    if (!customElements.get('bili-comments')) customElements.define('bili-comments', MockReviewComments);
+    document.querySelector('.outside').append(document.createElement('bili-comments'));
+  });
+  await startSitting(page);
+  const shadowEditor = page.locator('bili-comments').locator('bili-comment-box').locator('.ProseMirror');
+  await shadowEditor.click();
+  await page.keyboard.press('Space');
+  await expect(sitting(page).locator('.bcm-session-answer')).toBeHidden();
+
+  await sitting(page).getByRole('button', { name: '显示答案', exact: true }).click();
+  await expect(sitting(page).locator('.bcm-ratings')).toBeVisible();
+
+  await page.locator('.bcm-notebook-header').getByRole('button', { name: '设置', exact: true }).click();
+  const batchInput = page.getByLabel('每组复习条数', { exact: true });
+  await batchInput.click();
+  await page.keyboard.press('2');
+  await expect(sitting(page).locator('.bcm-session-title')).toHaveText('P1 · 00:42');
+  await page.locator('.bcm-panel').getByRole('button', { name: '关闭', exact: true }).click();
+
+  await shadowEditor.click();
+  await page.keyboard.type('123');
+  await expect(sitting(page).locator('.bcm-session-title')).toHaveText('P1 · 00:42');
 });
 
 test('native fullscreen keeps the notebook visible and keyboard close restores focus', async ({page}) => {

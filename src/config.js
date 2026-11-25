@@ -4,14 +4,14 @@ const SERIES_PREFIX = 'bili_caption_mask_v240_series:';
 const DEFAULTS = Object.freeze({
     enabled: true, left: 15, top: 84, width: 70, height: 7.2,
     blur: 14, mode: 'blur', singleKeys: true, leadIn: 3,
-    loopBefore: 3, loopAfter: 3, loopCount: 3, loopGap: 0, playbackRate: 1
+    loopBefore: 3, loopAfter: 3, loopCount: 3, loopGap: 0, playbackRate: 1, reviewBatch: 20
 });
 const GEOMETRY = new Set(['left', 'top', 'width', 'height']);
 const BOOLEANS = new Set(['enabled', 'singleKeys']);
 const LIMITS = {
     left: [0, 100], top: [0, 100], width: [5, 100], height: [2, 100],
     blur: [0, 40], leadIn: [0, 30], loopBefore: [0, 60], loopAfter: [0, 60],
-    loopCount: [1, 20], loopGap: [0, 30], playbackRate: [0.25, 3]
+    loopCount: [1, 20], loopGap: [0, 30], playbackRate: [0.25, 3], reviewBatch: [5, 100]
 };
 const UNSAFE = new Set(['__proto__', 'prototype', 'constructor']);
 
@@ -49,7 +49,7 @@ function normalize(input) {
         } else if (typeof value === 'number' && Number.isFinite(value)) {
             const [min, max] = LIMITS[key];
             output[key] = Math.max(min, Math.min(max, value));
-            if (key === 'loopCount') output[key] = Math.round(output[key]);
+            if (key === 'loopCount' || key === 'reviewBatch') output[key] = Math.round(output[key]);
         }
     }
     output.left = Math.min(output.left, 100 - output.width);
