@@ -11,7 +11,7 @@ async function boot(page) {
     body: route.request().url().includes('/__bcm__/bundle.js') ? script : fixture,
   }));
   await page.goto(url);
-  await expect(page.locator('#bcm-app')).toHaveAttribute('data-version', '3.1.0');
+  await expect(page.locator('#bcm-app')).toHaveAttribute('data-version', '3.1.1');
   await expect(page.locator('.bcm-dock')).toBeVisible();
   await page.waitForFunction(() => document.querySelector('video').readyState >= 2);
 }
@@ -277,23 +277,23 @@ test('desktop and narrow layouts keep controls inside the viewport',async({page}
   await page.keyboard.press('Escape');
   await dockClick(page, 'capture');
   await expect(page.locator('.bcm-notification')).toHaveText('已记录 00:42');
-  await page.screenshot({path:'artifacts/v3.1.0-desktop-player.png'});
+  await page.screenshot({path:'artifacts/v3.1.1-desktop-player.png'});
   await dockClick(page, 'notebook');
   await expect(page.locator('.bcm-note-image')).toBeVisible();
   await expect(page.locator('.bcm-notification')).toBeHidden();
-  await page.screenshot({path:'artifacts/v3.1.0-desktop.png'});
+  await page.screenshot({path:'artifacts/v3.1.1-desktop.png'});
   await page.setViewportSize({width:390,height:780});
   const notebook = page.locator('.bcm-notebook');
   await expect(notebook).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   await expect(dock).toHaveCSS('top', '48px');
   expect(await notebook.evaluate(el => el.scrollWidth > el.clientWidth + 1)).toBe(false);
   expect(await notebook.locator('.bcm-notebook-scroll').evaluate(el => el.scrollWidth > el.clientWidth + 1)).toBe(false);
-  await page.screenshot({path:'artifacts/v3.1.0-narrow.png'});
+  await page.screenshot({path:'artifacts/v3.1.1-narrow.png'});
   await notebook.getByRole('button', { name: '设置' }).click();
   const panel = page.locator('.bcm-panel');
   await expect(panel).toHaveCSS('color-scheme', 'light');
   expect(await panel.evaluate(el => el.scrollWidth > el.clientWidth + 1)).toBe(false);
-  await page.screenshot({path:'artifacts/v3.1.0-narrow-settings.png'});
+  await page.screenshot({path:'artifacts/v3.1.1-narrow-settings.png'});
   expect(errors).toEqual([]);
 });
 
@@ -451,7 +451,8 @@ test('pairs locally, retries an offline send and skips acknowledged notes after 
       sessionStorage.setItem('test-push-count', count);
       if (count === 1) options.onerror();
       else options.onload({ status: 200, finalUrl: options.url,
-        responseText: '{"imported":1,"duplicates":0}' });
+        responseText: note.userNote === '看完后补记' ? '{"imported":0,"updated":1,"duplicates":0}'
+          : '{"imported":1,"duplicates":0}' });
     };
   });
   await boot(page);
@@ -477,4 +478,26 @@ test('pairs locally, retries an offline send and skips acknowledged notes after 
   await send.click();
   await expect(page.getByText('已发送 0 条，跳过 1 条已发送记录。')).toBeVisible();
   expect(await page.evaluate(() => sessionStorage.getItem('test-push-count'))).toBe('2');
+  await page.locator('.bcm-note-input').fill('看完后补记');
+  await send.click();
+  await expect(page.getByText(/更新 1 条备注/)).toBeVisible();
+  expect(await page.evaluate(() => sessionStorage.getItem('test-push-count'))).toBe('3');
+});
+
+
+test('saves the loopback address and auto-send preference before pairing', async ({ page }) => {
+  await page.addInitScript(() => {
+    const values = new Map();
+    window.GM_getValue = (key, fallback) => values.get(key) ?? fallback;
+    window.GM_setValue = (key, value) => values.set(key, value);
+  });
+  await boot(page);
+  await dockClick(page, 'version');
+  await page.getByLabel('本机地址').fill('http://localhost:8768');
+  await page.getByLabel('记录后自动发送').check();
+  await page.getByRole('button', { name: '保存设置' }).click();
+  await expect(page.locator('.bcm-notification')).toContainText('配对后才会自动发送');
+  await dockClick(page, 'version');
+  await expect(page.getByLabel('本机地址')).toHaveValue('http://localhost:8768');
+  await expect(page.getByLabel('记录后自动发送')).toBeChecked();
 });

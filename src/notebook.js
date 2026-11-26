@@ -156,7 +156,7 @@ function exportHtml({ notes, exportedAt }, scopeLabel) {
 }
 
 /** Non-modal notebook. The caller owns attachment and fullscreen placement. */
-export function createNotebook({ repo, player, notify = () => {}, version = '3.1.0', onChange = () => {}, onHelp, onSettings, onSync }) {
+export function createNotebook({ repo, player, notify = () => {}, version = '3.1.1', onChange = () => {}, onHelp, onSettings, onSync }) {
     let opened = false;
     let disposed = false;
     let offset = 0;
@@ -569,7 +569,8 @@ export function createNotebook({ repo, player, notify = () => {}, version = '3.1
             if (!data.notes.length) { setNotice('当前范围没有可发送的记录。'); return; }
             setNotice(`正在发送 ${data.notes.length} 条场景…`);
             const result = await onSync(data.notes.map(note => note.id));
-            if (!disposed) setNotice(`已发送 ${result.imported} 条，跳过 ${result.skipped} 条已发送记录。`);
+            const updated = result.updated ? `更新 ${result.updated} 条备注，` : '';
+            if (!disposed) setNotice(`已发送 ${result.imported} 条，${updated}跳过 ${result.skipped} 条已发送记录。`);
         } catch (error) {
             if (!disposed) setNotice(`部分或全部场景待发送：${readableError(error)}`, true);
         } finally { action.disabled = false; }

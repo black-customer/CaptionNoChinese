@@ -217,7 +217,7 @@ export function createConfigStore(options = {}) {
         if (typeof gmGet !== 'function' || typeof gmSet !== 'function') {
             throw new Error('当前环境不能安全保存配对，请使用 JSON 备份');
         }
-        const value = { base, token, auto: Boolean(token) && auto === true };
+        const value = { base, token, auto: auto === true };
         write(SYNC_KEY, value);
         return value;
     }

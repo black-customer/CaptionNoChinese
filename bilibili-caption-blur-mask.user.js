@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 剧集双语字幕羽化遮罩与生词本 (看剧学英语)
 // @namespace    https://github.com/CaptionNoChinese
-// @version      3.1.0
+// @version      3.1.1
 // @description  中文字幕遮罩、单键静默记录、按集整理备注，以及 JSON、Markdown 和 HTML 导出。
 // @author       black-customer
 // @homepageURL  https://github.com/black-customer/CaptionNoChinese
@@ -1227,17 +1227,17 @@
         };
       });
     }
-    async function hasSynced(scope, id) {
+    async function getSyncReceipt(scope, id) {
       await ready();
       return transaction(["meta"], "readonly", (tx, set) => {
         const request = tx.objectStore("meta").get(`scene-sync:${scope}:${id}`);
-        request.onsuccess = () => set(Boolean(request.result));
+        request.onsuccess = () => set(request.result?.value === true ? true : request.result);
       });
     }
-    async function markSynced(scope, id) {
+    async function markSynced(scope, id, updatedAt) {
       await ready();
       return transaction(["meta"], "readwrite", (tx) => {
-        tx.objectStore("meta").put({ key: `scene-sync:${scope}:${id}`, syncedAt: Date.now() });
+        tx.objectStore("meta").put({ key: `scene-sync:${scope}:${id}`, updatedAt });
       });
     }
     async function syncNote(id) {
@@ -1342,7 +1342,7 @@
       previewImport,
       importBackup,
       close,
-      hasSynced,
+      getSyncReceipt,
       markSynced,
       syncNote
     };
@@ -1789,7 +1789,7 @@
       if (typeof gmGet !== "function" || typeof gmSet !== "function") {
         throw new Error("当前环境不能安全保存配对，请使用 JSON 备份");
       }
-      const value = { base, token, auto: Boolean(token) && auto === true };
+      const value = { base, token, auto: auto === true };
       write(SYNC_KEY, value);
       return value;
     }
@@ -1991,7 +1991,7 @@
     return "<!doctype html>\n" + output.documentElement.outerHTML;
   }
   function createNotebook({ repo, player, notify = () => {
-  }, version = "3.1.0", onChange = () => {
+  }, version = "3.1.1", onChange = () => {
   }, onHelp, onSettings, onSync }) {
     let opened = false;
     let disposed = false;
@@ -2414,7 +2414,8 @@
         }
         setNotice(`正在发送 ${data.notes.length} 条场景…`);
         const result = await onSync(data.notes.map((note) => note.id));
-        if (!disposed) setNotice(`已发送 ${result.imported} 条，跳过 ${result.skipped} 条已发送记录。`);
+        const updated = result.updated ? `更新 ${result.updated} 条备注，` : "";
+        if (!disposed) setNotice(`已发送 ${result.imported} 条，${updated}跳过 ${result.skipped} 条已发送记录。`);
       } catch (error) {
         if (!disposed) setNotice(`部分或全部场景待发送：${readableError(error)}`, true);
       } finally {
@@ -2628,19 +2629,30 @@
           new TextEncoder().encode(options.base + "\n" + options.token)
         );
         const scope = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-        const counts = { imported: 0, skipped: 0 };
+        const counts = { imported: 0, updated: 0, skipped: 0 };
         for (const id of new Set(ids)) {
-          if (await repo.hasSynced(scope, id)) {
-            counts.skipped++;
-            continue;
+          const receipt = await repo.getSyncReceipt(scope, id);
+          if (receipt) {
+            const current = await repo.get(id);
+            if (!current) continue;
+            const previous = receipt.updatedAt ?? receipt.syncedAt ?? current.createdAt;
+            if (!current.userNote?.trim() || current.updatedAt <= previous) {
+              counts.skipped++;
+              continue;
+            }
           }
           const note = await repo.syncNote(id);
           if (!note) continue;
           const result = await send(options, "inbox", [note]);
           if (result?.imported === 1 && result.duplicates === 0) counts.imported++;
-          else if (result?.imported === 0 && result.duplicates === 1) counts.skipped++;
-          else throw new Error("桌面端未确认收到记录");
-          await repo.markSynced(scope, id);
+          else if (result?.imported === 0 && result.updated === 1 && result.duplicates === 0) counts.updated++;
+          else if (result?.imported === 0 && result.duplicates === 1) {
+            if (receipt && result.updated === void 0) {
+              throw new Error("请更新桌面学习器后重试补同步备注");
+            }
+            counts.skipped++;
+          } else throw new Error("桌面端未确认收到记录");
+          await repo.markSynced(scope, id, note.updatedAt);
         }
         return counts;
       });
@@ -2658,7 +2670,7 @@
   var notebook_default = ".bcm-notebook {\n  position: absolute;\n  inset-block: 0;\n  inset-inline-end: 0;\n  display: flex;\n  flex-direction: column;\n  box-sizing: border-box;\n  width: min(432px, 100%);\n  overflow: hidden;\n  border-inline-start: 1px solid var(--bcm-line);\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  box-shadow: -12px 0 32px rgb(15 23 42 / 10%);\n  pointer-events: auto;\n}\n.bcm-notebook:focus { outline: none; }\n.bcm-notebook h2, .bcm-notebook h3, .bcm-notebook p { margin: 0; padding: 0; }\n.bcm-notebook-header {\n  flex: none;\n  padding: 18px 18px 16px;\n  border-block-end: 1px solid var(--bcm-line);\n  background: var(--bcm-bg);\n}\n.bcm-heading-row, .bcm-header-tools, .bcm-toolbar {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 6px;\n}\n.bcm-notebook .bcm-notebook-title {\n  margin-inline-end: auto;\n  font-size: 21px;\n  line-height: 1.3;\n  font-weight: 700;\n}\n.bcm-notebook .bcm-subtitle { margin-block: 4px 14px; color: var(--bcm-muted); }\n.bcm-notebook .bcm-button {\n  appearance: none;\n  min-height: 34px;\n  max-width: 100%;\n  margin: 0;\n  padding: 6px 8px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 6px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n  font-size: 13px;\n  line-height: 1.35;\n  text-align: center;\n  overflow-wrap: anywhere;\n  cursor: pointer;\n  touch-action: manipulation;\n}\n.bcm-notebook .bcm-button:hover:not(:disabled) { background: var(--bcm-hover); }\n.bcm-notebook .bcm-button-primary {\n  border-color: var(--bcm-primary);\n  background: var(--bcm-primary);\n  color: var(--bcm-primary-ink);\n  font-weight: 600;\n}\n.bcm-notebook .bcm-button-primary:hover:not(:disabled) { background: var(--bcm-primary-hover); }\n.bcm-notebook .bcm-button-quiet { background: transparent; border-color: transparent; }\n.bcm-notebook .bcm-delete { color: var(--bcm-muted); }\n.bcm-notebook .bcm-delete:hover:not(:disabled) { color: var(--bcm-danger); background: var(--bcm-danger-bg); }\n\n.bcm-notebook-scroll {\n  flex: 1;\n  min-height: 0;\n  overflow: auto;\n  overscroll-behavior: contain;\n  scrollbar-color: var(--bcm-line-strong) var(--bcm-bg);\n  scrollbar-width: thin;\n}\n.bcm-filters { display: grid; gap: 8px; padding: 16px 18px 12px; }\n.bcm-field { display: grid; gap: 6px; min-width: 0; }\n.bcm-label { color: var(--bcm-muted); font-size: 12px; line-height: 1.4; }\n.bcm-filter-row { display: grid; grid-template-columns: minmax(0, 132px) minmax(0, 1fr); gap: 8px; }\n.bcm-notebook .bcm-input, .bcm-notebook .bcm-select {\n  appearance: auto;\n  display: block;\n  width: 100%;\n  min-width: 0;\n  min-height: 38px;\n  margin: 0;\n  padding: 7px 9px;\n  border: 1px solid var(--bcm-line-strong);\n  border-radius: 7px;\n  background: var(--bcm-bg);\n  color: var(--bcm-text);\n}\n.bcm-notebook .bcm-input::placeholder { color: var(--bcm-muted); opacity: 1; }\n.bcm-notebook textarea.bcm-input { min-height: 66px; resize: vertical; overflow-wrap: anywhere; background: var(--bcm-subtle); }\n.bcm-notebook textarea.bcm-input:focus { background: var(--bcm-bg); }\n.bcm-result-summary, .bcm-page-label, .bcm-save-state {\n  color: var(--bcm-muted);\n  font-size: 12px;\n  font-variant-numeric: tabular-nums;\n}\n.bcm-notices, .bcm-undo, .bcm-import-preview {\n  margin: 0 18px 12px;\n  padding: 10px 12px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 8px;\n  background: var(--bcm-subtle);\n  overflow-wrap: anywhere;\n}\n.bcm-notices, .bcm-undo { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }\n.bcm-notices > span, .bcm-undo > span { flex: 1 1 180px; }\n.bcm-notice-error { color: var(--bcm-danger); background: var(--bcm-danger-bg); }\n.bcm-notebook .bcm-import-preview h3 { font-size: 15px; margin-block-end: 6px; }\n.bcm-notebook .bcm-import-preview p { margin-block-end: 10px; }\n\n.bcm-note-list { padding-inline: 18px; }\n.bcm-note {\n  display: grid;\n  min-width: 0;\n  gap: 10px;\n  padding-block: 16px 18px;\n  border-block-start: 1px solid var(--bcm-line);\n}\n.bcm-meta-tags { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }\n.bcm-tag-series, .bcm-tag-episode {\n  max-width: 100%;\n  padding: 3px 8px;\n  border: 1px solid var(--bcm-line);\n  border-radius: 14px;\n  background: var(--bcm-subtle);\n  color: #374151;\n  font-size: 12px;\n  overflow-wrap: anywhere;\n}\n.bcm-tag-series { font-weight: 600; }\n.bcm-tag-episode { background: var(--bcm-bg); }\n.bcm-image-placeholder {\n  display: grid;\n  place-items: center;\n  aspect-ratio: 16 / 9;\n  overflow: hidden;\n  border-radius: 8px;\n  background: var(--bcm-subtle);\n  color: var(--bcm-muted);\n  font-size: 13px;\n  text-align: center;\n}\n.bcm-note-image { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }\n.bcm-playback-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }\n.bcm-notebook .bcm-play-button { font-variant-numeric: tabular-nums; font-weight: 600; }\n.bcm-save-state { text-align: end; }\n.bcm-save-error { color: var(--bcm-danger); }\n.bcm-empty { padding: 26px 0; border-block-start: 1px solid var(--bcm-line); color: var(--bcm-muted); }\n.bcm-notebook .bcm-empty h3 { margin-block-end: 6px; color: var(--bcm-text); font-size: 16px; }\n.bcm-pagination {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  flex-wrap: wrap;\n  gap: 8px;\n  padding: 12px 18px;\n  border-block-start: 1px solid var(--bcm-line);\n}\n.bcm-notebook .bcm-storage-note { padding: 12px 18px 18px; color: var(--bcm-muted); font-size: 12px; }\n\n@media (max-width: 440px) {\n  .bcm-notebook-header, .bcm-filters, .bcm-note-list, .bcm-pagination { padding-inline: 12px; }\n  .bcm-notebook-header .bcm-toolbar .bcm-button { padding-inline: 6px; font-size: 12px; }\n  .bcm-notices, .bcm-undo, .bcm-import-preview { margin-inline: 12px; }\n  .bcm-notebook .bcm-input, .bcm-notebook .bcm-select { font-size: 16px; }\n}\n@media (max-height: 420px) {\n  .bcm-notebook-header { padding-block: 8px; }\n  .bcm-notebook .bcm-subtitle { display: none; }\n  .bcm-notebook-header .bcm-toolbar { margin-block-start: 6px; }\n}\n@media (forced-colors: active) {\n  .bcm-notebook { border-color: CanvasText; }\n  .bcm-notebook .bcm-button { border-color: ButtonText; }\n}\n";
 
   // src/main.js
-  var VERSION = "3.1.0";
+  var VERSION = "3.1.1";
   var clamp = (n, low, high) => Math.max(low, Math.min(high, n));
   var BUTTON_LIKE = 'button, a[href], summary, [role="button"], [role="link"]';
   var SLIDER_LIKE = 'input[type="range"], [role="slider"]';
@@ -2964,11 +2976,12 @@
           return;
         }
         patch.shortcuts = { ...shortcutDrafts };
-        if (event.isTrusted && settings.getSync().token) {
+        const pairing = settings.getSync();
+        if (event.isTrusted && (baseInput.value.trim() !== pairing.base || autoInput.checked !== pairing.auto)) {
           try {
             settings.setSync({
               base: normalizeSyncBase(baseInput.value),
-              token: settings.getSync().token,
+              token: pairing.token,
               auto: autoInput.checked
             });
           } catch (error) {
@@ -2981,7 +2994,7 @@
           peek = false;
           paint();
           closePanel();
-          notify("设置已保存");
+          notify(autoInput.checked && !pairing.token ? "设置已保存，配对后才会自动发送。" : "设置已保存");
         } catch (error) {
           fail2(error);
         }
@@ -3093,7 +3106,8 @@
         };
         if (shot.imageBlob) note.imageBlob = shot.imageBlob;
         await repo.save(note);
-        if (event?.isTrusted && settings.getSync().auto) {
+        const pairing = settings.getSync();
+        if (event?.isTrusted && pairing.token && pairing.auto) {
           void sync.push([note.id]).catch((error) => notify(`记录已留在本机，暂未发送 · ${error.message}`));
         }
         notify(shot.imageBlob ? `已记录 ${note.timeStr}` : `已记录 ${note.timeStr}，截图不可用`, { kind: "success", duration: 1600 });

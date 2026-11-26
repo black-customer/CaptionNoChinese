@@ -256,13 +256,18 @@ function start() {
         return;
       }
       patch.shortcuts = { ...shortcutDrafts };
-      if (event.isTrusted && settings.getSync().token) {
+      const pairing = settings.getSync();
+      if (event.isTrusted && (baseInput.value.trim() !== pairing.base || autoInput.checked !== pairing.auto)) {
         try {
-          settings.setSync({ base: normalizeSyncBase(baseInput.value), token: settings.getSync().token,
+          settings.setSync({ base: normalizeSyncBase(baseInput.value), token: pairing.token,
             auto: autoInput.checked });
         } catch (error) { syncStatus.textContent = error.message; return; }
       }
-      try { config = settings.patch(snapshot.identity.seriesId, patch); peek = false; paint(); closePanel(); notify('设置已保存'); } catch (error) { fail(error); }
+      try {
+        config = settings.patch(snapshot.identity.seriesId, patch);
+        peek = false; paint(); closePanel();
+        notify(autoInput.checked && !pairing.token ? '设置已保存，配对后才会自动发送。' : '设置已保存');
+      } catch (error) { fail(error); }
     });
     panel.append(form); inputs.get('mode').focus();
   }
@@ -340,7 +345,8 @@ function start() {
       };
       if (shot.imageBlob) note.imageBlob = shot.imageBlob;
       await repo.save(note);
-      if (event?.isTrusted && settings.getSync().auto) {
+      const pairing = settings.getSync();
+      if (event?.isTrusted && pairing.token && pairing.auto) {
         void sync.push([note.id]).catch(error => notify(`记录已留在本机，暂未发送 · ${error.message}`));
       }
       notify(shot.imageBlob ? `已记录 ${note.timeStr}` : `已记录 ${note.timeStr}，截图不可用`, { kind: 'success', duration: 1600 });

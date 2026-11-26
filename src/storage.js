@@ -472,18 +472,18 @@ export function createRepository(options = {}) {
         });
     }
 
-    async function hasSynced(scope, id) {
+    async function getSyncReceipt(scope, id) {
         await ready();
         return transaction(['meta'], 'readonly', (tx, set) => {
             const request = tx.objectStore('meta').get(`scene-sync:${scope}:${id}`);
-            request.onsuccess = () => set(Boolean(request.result));
+            request.onsuccess = () => set(request.result?.value === true ? true : request.result);
         });
     }
 
-    async function markSynced(scope, id) {
+    async function markSynced(scope, id, updatedAt) {
         await ready();
         return transaction(['meta'], 'readwrite', tx => {
-            tx.objectStore('meta').put({ key: `scene-sync:${scope}:${id}`, syncedAt: Date.now() });
+            tx.objectStore('meta').put({ key: `scene-sync:${scope}:${id}`, updatedAt });
         });
     }
 
@@ -559,5 +559,5 @@ export function createRepository(options = {}) {
 
     function close() { closed = true; db?.close(); db = null; }
     return { ready, list, get, save, update, remove, restore, count, exportBackup, previewImport, importBackup, close,
-        hasSynced, markSynced, syncNote };
+        getSyncReceipt, markSynced, syncNote };
 }

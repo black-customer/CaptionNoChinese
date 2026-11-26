@@ -56,16 +56,31 @@ export function createSync({ repo, read, request }) {
             const digest = await crypto.subtle.digest('SHA-256',
                 new TextEncoder().encode(options.base + '\n' + options.token));
             const scope = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
-            const counts = { imported: 0, skipped: 0 };
+            const counts = { imported: 0, updated: 0, skipped: 0 };
             for (const id of new Set(ids)) {
-                if (await repo.hasSynced(scope, id)) { counts.skipped++; continue; }
+                const receipt = await repo.getSyncReceipt(scope, id);
+                if (receipt) {
+                    const current = await repo.get(id);
+                    if (!current) continue;
+                    const previous = receipt.updatedAt ?? receipt.syncedAt ?? current.createdAt;
+                    if (!current.userNote?.trim() || current.updatedAt <= previous) {
+                        counts.skipped++;
+                        continue;
+                    }
+                }
                 const note = await repo.syncNote(id);
                 if (!note) continue;
                 const result = await send(options, 'inbox', [note]);
                 if (result?.imported === 1 && result.duplicates === 0) counts.imported++;
-                else if (result?.imported === 0 && result.duplicates === 1) counts.skipped++;
-                else throw new Error('桌面端未确认收到记录');
-                await repo.markSynced(scope, id);
+                else if (result?.imported === 0 && result.updated === 1 &&
+                         result.duplicates === 0) counts.updated++;
+                else if (result?.imported === 0 && result.duplicates === 1) {
+                    if (receipt && result.updated === undefined) {
+                        throw new Error('请更新桌面学习器后重试补同步备注');
+                    }
+                    counts.skipped++;
+                } else throw new Error('桌面端未确认收到记录');
+                await repo.markSynced(scope, id, note.updatedAt);
             }
             return counts;
         });
